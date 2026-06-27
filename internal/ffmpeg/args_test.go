@@ -101,6 +101,37 @@ func TestClientArgs_LowDelayOff(t *testing.T) {
 	}
 }
 
+func TestHostPreviewArgs(t *testing.T) {
+	c := config.DefaultConfigFor("darwin").Host
+	got := argStr(HostPreviewArgs(c, "tcp://127.0.0.1:5555"))
+	for _, want := range []string{
+		"-f avfoundation", "-i 3:none",
+		"scale=480:-2,fps=10", "-c:v mjpeg", "-f mjpeg tcp://127.0.0.1:5555",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("期待する引数 %q が無い: %s", want, got)
+		}
+	}
+	// プレビューに本配信のエンコーダ/UDP 出力が混ざってはならない。
+	if strings.Contains(got, "mpegts") || strings.Contains(got, "videotoolbox") {
+		t.Errorf("プレビューに本配信用の出力が混入: %s", got)
+	}
+}
+
+func TestClientPreviewArgs(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client
+	c.OutputDevice = "/dev/video10"
+	got := argStr(ClientPreviewArgs(c, "tcp://127.0.0.1:5555"))
+	for _, want := range []string{
+		"-f v4l2 -i /dev/video10",
+		"scale=480:-2,fps=10", "-c:v mjpeg", "-f mjpeg tcp://127.0.0.1:5555",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("期待する引数 %q が無い: %s", want, got)
+		}
+	}
+}
+
 func TestEncodersForOS(t *testing.T) {
 	if EncodersForOS("darwin")[0] != "hevc_videotoolbox" {
 		t.Error("darwin の既定エンコーダ先頭が hevc_videotoolbox でない")

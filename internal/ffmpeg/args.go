@@ -84,11 +84,9 @@ func encoderExtra(enc string) []string {
 	}
 }
 
-// HostArgs は送信側 ffmpeg の引数列を生成する。
-func HostArgs(c config.HostConfig) []string {
-	args := []string{"-hide_banner", "-loglevel", "warning", "-stats"}
-
-	// 入力（キャプチャバックエンド別）。
+// hostInput はキャプチャバックエンド別の入力部分（-f … -i …）を args に付ける。
+// HostArgs と HostPreviewArgs で共有する。
+func hostInput(args []string, c config.HostConfig) []string {
 	switch c.Backend {
 	case "avfoundation":
 		// 注: mac の avfoundation スクリーンキャプチャに -framerate を付けると
@@ -109,6 +107,15 @@ func HostArgs(c config.HostConfig) []string {
 	default:
 		args = append(args, "-f", c.Backend, "-i", c.Source)
 	}
+	return args
+}
+
+// HostArgs は送信側 ffmpeg の引数列を生成する。
+func HostArgs(c config.HostConfig) []string {
+	args := []string{"-hide_banner", "-loglevel", "warning", "-stats"}
+
+	// 入力（キャプチャバックエンド別）。
+	args = hostInput(args, c)
 
 	// 映像フィルタ（解像度・FPS 正規化）。
 	args = append(args, "-vf", fmt.Sprintf("scale=%d:%d,fps=%d", c.Width, c.Height, c.FPS))
@@ -141,6 +148,36 @@ func ClientArgs(c config.ClientConfig) []string {
 
 	args = append(args, "-pix_fmt", c.PixFmt, "-f", "v4l2", c.OutputDevice)
 	return args
+}
+
+// プレビュー用の既定値（低解像度・低フレームレートで負荷を抑える）。
+const (
+	previewWidth = 480
+	previewFPS   = 10
+)
+
+// mjpegOutput は MJPEG を TCP へ吐く出力部分を args に付ける。
+// scale=W:-2 はアスペクト比を保ったまま偶数高さに丸める。
+func mjpegOutput(args []string, url string) []string {
+	args = append(args, "-vf", fmt.Sprintf("scale=%d:-2,fps=%d", previewWidth, previewFPS))
+	args = append(args, "-c:v", "mjpeg", "-q:v", "8", "-an", "-f", "mjpeg", url)
+	return args
+}
+
+// HostPreviewArgs は送信側プレビュー用 ffmpeg の引数列を生成する。
+// 本配信とは独立した別プロセスで画面をキャプチャし、MJPEG を url(TCP) へ送る。
+// 本配信を巻き込まずにオン/オフできるよう、あえてプロセスを分離している。
+func HostPreviewArgs(c config.HostConfig, url string) []string {
+	args := []string{"-hide_banner", "-loglevel", "error"}
+	args = hostInput(args, c)
+	return mjpegOutput(args, url)
+}
+
+// ClientPreviewArgs は受信側プレビュー用 ffmpeg の引数列を生成する。
+// 受信結果の v4l2 仮想カメラ（複数リーダ可）から読み出すため、本受信とは独立する。
+func ClientPreviewArgs(c config.ClientConfig, url string) []string {
+	args := []string{"-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", c.OutputDevice}
+	return mjpegOutput(args, url)
 }
 
 // Preview は引数列を人間可読な単一行コマンドへ整形する（表示・コピー用）。

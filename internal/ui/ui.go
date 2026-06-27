@@ -16,6 +16,7 @@ import (
 	"gioui.org/font/gofont"
 	"gioui.org/layout"
 	"gioui.org/op"
+	"gioui.org/op/paint"
 	"gioui.org/text"
 	"gioui.org/unit"
 	"gioui.org/widget"
@@ -25,6 +26,7 @@ import (
 	"lancast/internal/deps"
 	"lancast/internal/ffmpeg"
 	"lancast/internal/macperm"
+	"lancast/internal/preview"
 	"lancast/internal/runner"
 )
 
@@ -60,6 +62,7 @@ type App struct {
 	hStart, hStop, hClear, hRecheck        widget.Clickable
 	hPrev                                  widget.Editor
 	hPrevCache                             string
+	hPreviewOn                             widget.Bool
 	hLog                                   widget.List
 
 	// Client 入力。
@@ -68,6 +71,7 @@ type App struct {
 	cStart, cStop, cClear, cRecheck        widget.Clickable
 	cPrev                                  widget.Editor
 	cPrevCache                             string
+	cPreviewOn                             widget.Bool
 	cLog                                   widget.List
 
 	setupRecheck           widget.Clickable
@@ -78,10 +82,11 @@ type App struct {
 
 	hBackend string // OS 由来のキャプチャバックエンド（UI では編集しない）
 
-	hostRunner, clientRunner *runner.Runner
-	hostDeps, clientDeps     deps.Result
-	ffmpegBin                string
-	status                   string
+	hostRunner, clientRunner   *runner.Runner
+	hostPreview, clientPreview *preview.Preview
+	hostDeps, clientDeps       deps.Result
+	ffmpegBin                  string
+	status                     string
 }
 
 type fixField struct {
@@ -106,6 +111,13 @@ func NewApp() *App {
 		hostRunner:   runner.New(),
 		clientRunner: runner.New(),
 	}
+	invalidate := func() {
+		if a.win != nil {
+			a.win.Invalidate()
+		}
+	}
+	a.hostPreview = preview.New(invalidate)
+	a.clientPreview = preview.New(invalidate)
 	a.hLog.Axis = layout.Vertical
 	a.hLog.ScrollToEnd = true
 	a.cLog.Axis = layout.Vertical
@@ -232,6 +244,68 @@ func (a *App) startHost() {
 	}
 }
 
+// toggleHostPreview はチェックボックスに応じて送信側プレビューを開始/停止する。
+func (a *App) toggleHostPreview() {
+	if !a.hPreviewOn.Value {
+		a.hostPreview.Stop()
+		return
+	}
+	if runtime.GOOS == "darwin" && !macperm.Granted() {
+		a.hPreviewOn.Value = false
+		a.status = "プレビュー: 画面収録が未許可です（先に許可してください）"
+		return
+	}
+	cfg := a.assemble()
+	bin, _ := deps.FFmpegPath()
+	if bin == "" {
+		a.hPreviewOn.Value = false
+		a.status = "プレビュー: ffmpeg が見つかりません（Setup タブ参照）"
+		return
+	}
+	if err := a.hostPreview.Start(bin, func(url string) []string {
+		return ffmpeg.HostPreviewArgs(cfg.Host, url)
+	}); err != nil {
+		a.hPreviewOn.Value = false
+		a.status = "プレビュー: " + err.Error()
+	}
+}
+
+// toggleClientPreview はチェックボックスに応じて受信側プレビューを開始/停止する。
+func (a *App) toggleClientPreview() {
+	if !a.cPreviewOn.Value {
+		a.clientPreview.Stop()
+		return
+	}
+	cfg := a.assemble()
+	bin, _ := deps.FFmpegPath()
+	if bin == "" {
+		a.cPreviewOn.Value = false
+		a.status = "プレビュー: ffmpeg が見つかりません（Setup タブ参照）"
+		return
+	}
+	if err := a.clientPreview.Start(bin, func(url string) []string {
+		return ffmpeg.ClientPreviewArgs(cfg.Client, url)
+	}); err != nil {
+		a.cPreviewOn.Value = false
+		a.status = "プレビュー: " + err.Error()
+	}
+}
+
+// previewView はプレビューがオンのとき最新フレームを描画する。
+func (a *App) previewView(p *preview.Preview) func(C) D {
+	return func(gtx C) D {
+		img := p.Frame()
+		if img == nil {
+			return material.Body2(a.th, "（プレビュー待機中… 映像が届くと表示されます）").Layout(gtx)
+		}
+		if maxH := gtx.Dp(unit.Dp(240)); gtx.Constraints.Max.Y > maxH {
+			gtx.Constraints.Max.Y = maxH
+		}
+		im := widget.Image{Src: paint.NewImageOp(img), Fit: widget.Contain, Position: layout.W}
+		return im.Layout(gtx)
+	}
+}
+
 func (a *App) startClient() {
 	cfg := a.assemble()
 	if msg := cfg.Client.Validate(); msg != "" {
@@ -281,6 +355,8 @@ func (a *App) Run(w *app.Window) error {
 // SIGINT/SIGTERM 受信時に呼び、ffmpeg の孤児化（ポート/デバイスの掴みっぱなし）を防ぐ。
 // OOM/SIGKILL のような捕捉不能な強制終了は runner 側の Pdeathsig が担保する。
 func (a *App) Shutdown() {
+	a.hostPreview.Stop()
+	a.clientPreview.Stop()
 	a.hostRunner.Stop()
 	a.clientRunner.Stop()
 	// Stop は SIGINT→2秒後 SIGKILL でエスカレートする。最大 4 秒待って確実に落とす。
@@ -340,6 +416,12 @@ func (a *App) handleEvents(gtx C) {
 	}
 	if a.hGotoSetup.Clicked(gtx) || a.cGotoSetup.Clicked(gtx) {
 		a.cur = tabSetup
+	}
+	if a.hPreviewOn.Update(gtx) {
+		a.toggleHostPreview()
+	}
+	if a.cPreviewOn.Update(gtx) {
+		a.toggleClientPreview()
 	}
 	if a.hMacPerm.Clicked(gtx) {
 		// 未許可なら OS の許可モーダルを直接出す。既に許可済み（あるいは一度
@@ -463,6 +545,16 @@ func (a *App) hostTab(gtx C) D {
 		layout.Rigid(material.Body2(a.th, "実行コマンド:").Layout),
 		layout.Rigid(a.previewBox(&a.hPrev, &a.hPrevCache, ffmpeg.Preview("ffmpeg", ffmpeg.HostArgs(a.assemble().Host)))),
 		layout.Rigid(spacer(4)),
+		layout.Rigid(func(gtx C) D {
+			return material.CheckBox(a.th, &a.hPreviewOn, "映像プレビューを表示").Layout(gtx)
+		}),
+		layout.Rigid(func(gtx C) D {
+			if !a.hPreviewOn.Value {
+				return D{}
+			}
+			return a.previewView(a.hostPreview)(gtx)
+		}),
+		layout.Rigid(spacer(4)),
 		layout.Rigid(a.controlRow(&a.hStart, &a.hStop, &a.hClear, &a.hRecheck, ready, running)),
 		layout.Rigid(spacer(4)),
 		layout.Rigid(material.Body2(a.th, "ログ:").Layout),
@@ -492,6 +584,16 @@ func (a *App) clientTab(gtx C) D {
 		layout.Rigid(spacer(4)),
 		layout.Rigid(material.Body2(a.th, "実行コマンド:").Layout),
 		layout.Rigid(a.previewBox(&a.cPrev, &a.cPrevCache, ffmpeg.Preview("ffmpeg", ffmpeg.ClientArgs(a.assemble().Client)))),
+		layout.Rigid(spacer(4)),
+		layout.Rigid(func(gtx C) D {
+			return material.CheckBox(a.th, &a.cPreviewOn, "映像プレビューを表示").Layout(gtx)
+		}),
+		layout.Rigid(func(gtx C) D {
+			if !a.cPreviewOn.Value {
+				return D{}
+			}
+			return a.previewView(a.clientPreview)(gtx)
+		}),
 		layout.Rigid(spacer(4)),
 		layout.Rigid(a.controlRow(&a.cStart, &a.cStop, &a.cClear, &a.cRecheck, ready, running)),
 		layout.Rigid(spacer(4)),
