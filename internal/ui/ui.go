@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"gioui.org/app"
 	"gioui.org/font/gofont"
@@ -234,6 +235,13 @@ func (a *App) startClient() {
 		a.status = "Client: 依存が未充足です（Setup タブ参照）"
 		return
 	}
+	// 起動前チェック: 受信ポートが既に使われていれば（前回の受信が残っている等）、
+	// ffmpeg を起動しても bind に失敗して即死（exit 231）するだけなので、その前に弾く。
+	if err := runner.UDPPortAvailable(cfg.Client.ListenPort); err != nil {
+		a.status = fmt.Sprintf("Client: 受信ポート %d は使用中です。前回の受信がまだ動いていないか確認してください（`fuser -k %d/udp` で解放後に再度開始）。",
+			cfg.Client.ListenPort, cfg.Client.ListenPort)
+		return
+	}
 	if err := a.clientRunner.Start(a.ffmpegBin, ffmpeg.ClientArgs(cfg.Client)); err != nil {
 		a.status = "Client: " + err.Error()
 		return
@@ -257,6 +265,22 @@ func (a *App) Run(w *app.Window) error {
 			a.layout(gtx)
 			e.Frame(gtx.Ops)
 		}
+	}
+}
+
+// Shutdown は稼働中の ffmpeg を全て停止し、終了を待つ。ウィンドウを閉じた時・
+// SIGINT/SIGTERM 受信時に呼び、ffmpeg の孤児化（ポート/デバイスの掴みっぱなし）を防ぐ。
+// OOM/SIGKILL のような捕捉不能な強制終了は runner 側の Pdeathsig が担保する。
+func (a *App) Shutdown() {
+	a.hostRunner.Stop()
+	a.clientRunner.Stop()
+	// Stop は SIGINT→2秒後 SIGKILL でエスカレートする。最大 4 秒待って確実に落とす。
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		if !a.hostRunner.Running() && !a.clientRunner.Running() {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 }
 

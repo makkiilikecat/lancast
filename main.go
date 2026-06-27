@@ -9,8 +9,10 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"gioui.org/app"
 	"gioui.org/unit"
@@ -74,11 +76,25 @@ func main() {
 	}
 
 	// GUI モード。
+	a := ui.NewApp()
+
+	// SIGINT/SIGTERM を捕捉し、ffmpeg を停止してから終了する。
+	// （OOM/SIGKILL のような捕捉不能な強制終了に対しては、runner の Pdeathsig が
+	//  カーネルレベルで ffmpeg を道連れにする安全網となる。）
 	go func() {
-		a := ui.NewApp()
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+		<-sig
+		a.Shutdown()
+		os.Exit(0)
+	}()
+
+	go func() {
 		w := new(app.Window)
 		w.Option(app.Title("LANCast"), app.Size(unit.Dp(740), unit.Dp(860)))
-		if err := a.Run(w); err != nil {
+		err := a.Run(w)
+		a.Shutdown() // ウィンドウを閉じた時も ffmpeg を確実に停止する
+		if err != nil {
 			log.Fatal(err)
 		}
 		os.Exit(0)

@@ -3,6 +3,7 @@ package runner
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -151,7 +152,27 @@ func (r *Runner) maybeHint(line string) {
 		// 注: "Configuration of video device failed, falling back to default" は
 		// avfoundation で毎回出る正常な警告のため、ここでは拾わない。
 		r.append("[ヒント] macOS は『システム設定>プライバシー>画面収録』で許可が必要です（許可後アプリ再起動）。")
+	case strings.Contains(line, "VIDIOC_G_FMT"), strings.Contains(line, "Could not write header"):
+		// 受信側で仮想カメラ(出力デバイス)を開けない代表パターン。別プロセスが掴んでいる、
+		// または前回の受信 ffmpeg が残っているとここで失敗する。
+		r.append("[ヒント] 仮想カメラ(出力デバイス)が使用中か、別プロセスが掴んでいます。`fuser /dev/video10` で確認し、残プロセスを終了してください。")
 	}
+}
+
+// describeExitError は ffmpeg の終了エラーを人間向けの説明へ翻訳する。
+// 代表的な失敗（ポート/デバイス使用中）の終了コードを分かりやすく言い換える。
+// 該当しなければ元のメッセージ（例 "exit status N"）をそのまま返す。
+func describeExitError(err error) string {
+	var ee *exec.ExitError
+	if errors.As(err, &ee) {
+		switch ee.ExitCode() {
+		case 231:
+			return ee.Error() + "（受信ポートか仮想カメラが使用中の可能性。前回の受信プロセスが残っていないか確認してください）"
+		case 234:
+			return ee.Error() + "（出力デバイスが使用中か、ピクセル形式が非対応の可能性があります）"
+		}
+	}
+	return err.Error()
 }
 
 func (r *Runner) wait(cmd *exec.Cmd) {
@@ -161,7 +182,7 @@ func (r *Runner) wait(cmd *exec.Cmd) {
 	r.cmd = nil
 	r.mu.Unlock()
 	if err != nil {
-		r.append("[終了] " + err.Error())
+		r.append("[終了] " + describeExitError(err))
 	} else {
 		r.append("[終了] 正常終了")
 	}
