@@ -22,6 +22,9 @@ type Runner struct {
 
 	// OnUpdate はログ更新・状態変化時に呼ばれる（UI 再描画トリガ用）。
 	OnUpdate func()
+	// OnLine は新しいログ行ごとに呼ばれる（ヘッドレス時の標準出力用）。
+	// Start 前に設定し、以後変更しないこと。
+	OnLine func(string)
 }
 
 // New は Runner を生成する。
@@ -58,6 +61,9 @@ func (r *Runner) append(line string) {
 		r.lines = r.lines[len(r.lines)-maxLogLines:]
 	}
 	r.mu.Unlock()
+	if r.OnLine != nil {
+		r.OnLine(line)
+	}
 	r.notify()
 }
 

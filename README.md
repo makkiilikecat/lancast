@@ -57,6 +57,38 @@ sudo modprobe v4l2loopback devices=1 video_nr=10 card_label=MacScreen exclusive_
 mac で実行すると、ローカル(mac)と SSH 先の Linux の**両方**へインストールする。
 インストール先 Linux ホストは環境変数 `LINUX_SSH` で変更可（空にすると remote をスキップ）。
 
+## CLI / ヘッドレス実行
+
+引数なしで GUI 起動。`-host` / `-client` で **GUI なし・即時開始**（SSH 越しの自動化・常駐・統合テスト向け）。
+ffmpeg のログ（`frame=` 進捗など）を標準出力へ流し、`Ctrl-C`(SIGINT) で graceful 停止する。
+依存が不足する場合は導入コマンドを表示して中止する（自動実行はしない）。
+
+```bash
+# 受信側(Ubuntu): 仮想カメラへ書き込み
+lancast -client -port 5004 -device /dev/video10 -debug
+
+# 送信側(Mac): 画面を送出
+lancast -host -dest 192.168.0.215 -port 5004 -debug
+```
+
+保存済み設定をベースに、以下のフラグで上書きできる（指定したものだけ反映）:
+
+| フラグ | 対象 | 説明 |
+|---|---|---|
+| `-host` / `-client` | — | ヘッドレスで該当モードを即時起動 |
+| `-debug` | — | 詳細ログ（設定内容・依存チェック）を出力 |
+| `-dest` | host | 送信先 IP |
+| `-port` | 両方 | ポート（host=送信先 / client=受信） |
+| `-source` | host | キャプチャ入力（例 `3:none`, `:0.0`） |
+| `-encoder` | host | エンコーダ |
+| `-bitrate` / `-fps` / `-size` | host | ビットレート kbps / FPS / `1280x720` |
+| `-device` | client | 出力デバイス（例 `/dev/video10`） |
+| `-fifo` | client | 受信バッファ |
+| `-extra` | 両方 | ffmpeg 追加引数 |
+
+> 検証: Mac 画面 → `lancast -host` → UDP → `lancast -client` → `/dev/video10` を
+> `ffmpeg -f v4l2 -i /dev/video10` でキャプチャし、実映像が流れることを確認済み。
+
 ## ビルド / 起動（開発）
 
 ```bash
