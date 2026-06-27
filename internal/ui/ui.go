@@ -24,6 +24,7 @@ import (
 
 	"lancast/internal/config"
 	"lancast/internal/deps"
+	"lancast/internal/display"
 	"lancast/internal/ffmpeg"
 	"lancast/internal/macperm"
 	"lancast/internal/preview"
@@ -58,6 +59,7 @@ type App struct {
 	hEncBtn                                widget.Clickable
 	hEncoders                              []string
 	hEncIdx                                int
+	screenW, screenH                       int // 検出した実画面の解像度（0=未検出）
 	presets                                []presetBtn
 	hStart, hStop, hClear, hRecheck        widget.Clickable
 	hPrev                                  widget.Editor
@@ -72,6 +74,9 @@ type App struct {
 	cPrev                                  widget.Editor
 	cPrevCache                             string
 	cPreviewOn                             widget.Bool
+	cRestore                               widget.Bool
+	cTargetBtn                             widget.Clickable
+	cTargetIdx                             int
 	cLog                                   widget.List
 
 	setupRecheck           widget.Clickable
@@ -94,11 +99,11 @@ type fixField struct {
 	cache string
 }
 
-// presetBtn は解像度プリセットボタン1個。
+// presetBtn は解像度プリセットボタン1個。縦解像度を指定し、横は画面比から算出する。
 type presetBtn struct {
-	label string
-	w, h  string
-	btn   widget.Clickable
+	label  string
+	height int
+	btn    widget.Clickable
 }
 
 // NewApp は保存済み設定を読み込んで App を初期化する。
@@ -131,9 +136,13 @@ func NewApp() *App {
 		e.SingleLine = true
 	}
 	a.presets = []presetBtn{
-		{label: "720p", w: "1280", h: "720"},
-		{label: "1080p", w: "1920", h: "1080"},
-		{label: "1440p", w: "2560", h: "1440"},
+		{label: "720p", height: 720},
+		{label: "1080p", height: 1080},
+		{label: "1440p", height: 1440},
+	}
+	// 画面比を検出（mac のみ）。プリセットの横解像度算出と送出比の埋め込みに使う。
+	if w, h, ok := display.MainAspect(); ok {
+		a.screenW, a.screenH = w, h
 	}
 	a.hPrev.ReadOnly = true
 	a.cPrev.ReadOnly = true
@@ -172,6 +181,11 @@ func (a *App) loadFromConfig(cfg config.Config) {
 	a.cPixFmt.SetText(c.PixFmt)
 	a.cExtra.SetText(c.ExtraArgs)
 	a.cLowDelay.Value = c.LowDelay
+	a.cRestore.Value = c.RestoreAspect
+	a.cTargetIdx = slices.Index(config.TargetAspects, c.TargetAspect)
+	if a.cTargetIdx < 0 {
+		a.cTargetIdx = 0
+	}
 }
 
 func encoderIndex(list []string, enc string) int {
@@ -199,14 +213,19 @@ func (a *App) assemble() config.Config {
 			DestIP:        a.hDestIP.Text(),
 			DestPort:      atoi(a.hPort.Text()),
 			ExtraArgs:     a.hExtra.Text(),
+			// 実画面比を埋め込む。Width:Height と異なれば自動でアナモルフィック送出。
+			DARNum: a.screenW,
+			DARDen: a.screenH,
 		},
 		Client: config.ClientConfig{
-			ListenPort:   atoi(a.cPort.Text()),
-			OutputDevice: a.cDevice.Text(),
-			PixFmt:       a.cPixFmt.Text(),
-			FifoSize:     atoi(a.cFifo.Text()),
-			LowDelay:     a.cLowDelay.Value,
-			ExtraArgs:    a.cExtra.Text(),
+			ListenPort:    atoi(a.cPort.Text()),
+			OutputDevice:  a.cDevice.Text(),
+			PixFmt:        a.cPixFmt.Text(),
+			FifoSize:      atoi(a.cFifo.Text()),
+			LowDelay:      a.cLowDelay.Value,
+			ExtraArgs:     a.cExtra.Text(),
+			RestoreAspect: a.cRestore.Value,
+			TargetAspect:  config.TargetAspects[a.cTargetIdx],
 		},
 	}
 }
@@ -382,9 +401,14 @@ func (a *App) handleEvents(gtx C) {
 
 	for i := range a.presets {
 		if a.presets[i].btn.Clicked(gtx) {
-			a.hWidth.SetText(a.presets[i].w)
-			a.hHeight.SetText(a.presets[i].h)
+			h := a.presets[i].height
+			// 縦を基準に、画面比を保った横解像度を 16 整列で自動算出する。
+			a.hHeight.SetText(strconv.Itoa(h))
+			a.hWidth.SetText(strconv.Itoa(ffmpeg.PresetWidth(h, a.screenW, a.screenH)))
 		}
+	}
+	if a.cTargetBtn.Clicked(gtx) {
+		a.cTargetIdx = (a.cTargetIdx + 1) % len(config.TargetAspects)
 	}
 	if a.hEncBtn.Clicked(gtx) && len(a.hEncoders) > 0 {
 		a.hEncIdx = (a.hEncIdx + 1) % len(a.hEncoders)
@@ -514,6 +538,7 @@ func (a *App) hostTab(gtx C) D {
 		layout.Rigid(a.warnIfNotReady(ready, &a.hGotoSetup)),
 		layout.Rigid(a.macPermRow()),
 		layout.Rigid(a.presetRow),
+		layout.Rigid(a.hint(a.screenAspectHint())),
 		layout.Rigid(spacer(4)),
 		layout.Rigid(func(gtx C) D {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
@@ -523,6 +548,7 @@ func (a *App) hostTab(gtx C) D {
 				layout.Flexed(1, a.boxedEditor(&a.hHeight)),
 			)
 		}),
+		layout.Rigid(a.hint(a.anamorphicHint())),
 		layout.Rigid(a.field("FPS", &a.hFPS)),
 		layout.Rigid(a.field("ビットレート(kbps)", &a.hBitrate)),
 		layout.Rigid(func(gtx C) D {
@@ -579,6 +605,17 @@ func (a *App) clientTab(gtx C) D {
 		layout.Rigid(a.field("ピクセル形式", &a.cPixFmt)),
 		layout.Rigid(func(gtx C) D {
 			return material.CheckBox(a.th, &a.cLowDelay, "低遅延 (nobuffer + low_delay)").Layout(gtx)
+		}),
+		layout.Rigid(func(gtx C) D {
+			return material.CheckBox(a.th, &a.cRestore, "アスペクト復元（送信側の実画面比へ伸長）").Layout(gtx)
+		}),
+		layout.Rigid(func(gtx C) D {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(a.labelCell("目標比率(端を黒埋め)")),
+				layout.Rigid(func(gtx C) D {
+					return material.Button(a.th, &a.cTargetBtn, targetAspectLabel(a.cTargetIdx)).Layout(gtx)
+				}),
+			)
 		}),
 		layout.Rigid(a.field("追加引数", &a.cExtra)),
 		layout.Rigid(spacer(4)),
@@ -781,6 +818,48 @@ func (a *App) encoderLabel() string {
 		return fmt.Sprintf("(%d/%d) %s ▸", a.hEncIdx+1, len(a.hEncoders), a.hEncoders[a.hEncIdx])
 	}
 	return "(なし)"
+}
+
+// screenAspectHint は検出した画面比を説明するヒント文を返す。
+func (a *App) screenAspectHint() string {
+	if a.screenW <= 0 || a.screenH <= 0 {
+		return "プリセットは縦基準・横は画面比から自動算出（画面比は未検出のため 16:9 とみなします）。"
+	}
+	g := gcd(a.screenW, a.screenH)
+	return fmt.Sprintf("画面比 %d:%d（%d×%d）。プリセットは縦基準で横を自動算出します。",
+		a.screenW/g, a.screenH/g, a.screenW, a.screenH)
+}
+
+// anamorphicHint は現在の幅×高さが画面比と異なるとき、アナモルフィック送出に
+// なる旨を知らせる。
+func (a *App) anamorphicHint() string {
+	w, h := atoi(a.hWidth.Text()), atoi(a.hHeight.Text())
+	if w <= 0 || h <= 0 || a.screenW <= 0 || a.screenH <= 0 {
+		return ""
+	}
+	if w*a.screenH == h*a.screenW {
+		return "" // 画面比と一致（歪み無し）。
+	}
+	return "※ 現在の幅×高さは画面比と異なります。圧縮映像＋実画面比メタデータ（アナモルフィック）で送出し、受信側で復元します。"
+}
+
+func gcd(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	if a < 0 {
+		return -a
+	}
+	return a
+}
+
+// targetAspectLabel は目標比率セレクタのボタン表示を返す。
+func targetAspectLabel(idx int) string {
+	v := config.TargetAspects[idx]
+	if v == "" {
+		v = "なし"
+	}
+	return fmt.Sprintf("(%d/%d) %s ▸", idx+1, len(config.TargetAspects), v)
 }
 
 func setIfChanged(ed *widget.Editor, cache *string, val string) {

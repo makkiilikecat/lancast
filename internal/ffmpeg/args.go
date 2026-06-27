@@ -117,8 +117,14 @@ func HostArgs(c config.HostConfig) []string {
 	// 入力（キャプチャバックエンド別）。
 	args = hostInput(args, c)
 
-	// 映像フィルタ（解像度・FPS 正規化）。
-	args = append(args, "-vf", fmt.Sprintf("scale=%d:%d,fps=%d", c.Width, c.Height, c.FPS))
+	// 映像フィルタ（解像度・FPS 正規化）。DAR が指定され、かつ Width:Height と
+	// 異なる場合はアナモルフィック（圧縮映像＋表示比メタデータ）として送る。
+	// setdar が H.264/HEVC の SAR に反映され、受信側が実比率を復元できる。
+	vf := fmt.Sprintf("scale=%d:%d,fps=%d", c.Width, c.Height, c.FPS)
+	if dar := darFilter(c); dar != "" {
+		vf += "," + dar
+	}
+	args = append(args, "-vf", vf)
 
 	// コーデック。
 	args = append(args, "-c:v", c.Encoder, "-b:v", fmt.Sprintf("%dk", c.Bitrate))
@@ -134,6 +140,36 @@ func HostArgs(c config.HostConfig) []string {
 	return args
 }
 
+// darFilter は送出フレームに付ける表示比メタデータ（setdar）を返す。
+// DAR 未指定、または DAR が Width:Height と一致する（＝歪み無し）なら空。
+func darFilter(c config.HostConfig) string {
+	if c.DARNum <= 0 || c.DARDen <= 0 {
+		return ""
+	}
+	if c.DARNum*c.Height == c.DARDen*c.Width {
+		return "" // 既に正方ピクセル相当。メタデータ不要。
+	}
+	return fmt.Sprintf("setdar=%d/%d", c.DARNum, c.DARDen)
+}
+
+// Align16 は v4l2 のストライド・パディング由来のシアー（斜めズレ）を避けるため、
+// 値を 16 の倍数（最低 16）へ最近接で丸める。
+func Align16(v int) int {
+	if v < 16 {
+		return 16
+	}
+	return (v + 8) / 16 * 16
+}
+
+// PresetWidth は縦解像度 height と画面比 aw:ah から、比率を保った横解像度を返す
+// （16 の倍数へ丸め）。aw/ah が無効なら 16:9 とみなす。
+func PresetWidth(height, aw, ah int) int {
+	if aw <= 0 || ah <= 0 {
+		aw, ah = 16, 9
+	}
+	return Align16(height * aw / ah)
+}
+
 // ClientArgs は受信側 ffmpeg の引数列を生成する（v4l2 仮想カメラへ書き込み）。
 func ClientArgs(c config.ClientConfig) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning", "-stats"}
@@ -146,8 +182,52 @@ func ClientArgs(c config.ClientConfig) []string {
 
 	args = append(args, splitArgs(c.ExtraArgs)...)
 
+	if vf := clientVF(c); vf != "" {
+		args = append(args, "-vf", vf)
+	}
+
 	args = append(args, "-pix_fmt", c.PixFmt, "-f", "v4l2", c.OutputDevice)
 	return args
+}
+
+// clientVF は復元（SAR→正方ピクセル）と目標比率パディングのフィルタ鎖を組む。
+// どちらも不要なら空（無加工＝従来挙動）。
+func clientVF(c config.ClientConfig) string {
+	var f []string
+	if c.RestoreAspect {
+		// 受信 SAR を反映して実比率の幅へ伸長し、以後は正方ピクセルとして扱う。
+		f = append(f, "scale='trunc(iw*sar/2)*2':ih", "setsar=1")
+	}
+	if num, den, ok := parseAspect(c.TargetAspect); ok {
+		// 指定比率の枠へ収まるよう端を黒で埋める（切り取らない）。
+		// 幅は 16 の倍数・高さは偶数へ切り上げ、v4l2 のシアーも同時に回避。
+		f = append(f, padToAspect(num, den))
+	} else if c.RestoreAspect {
+		// 目標比率を使わない場合でも、復元後の幅を 16 整列してシアーを防ぐ。
+		f = append(f, "pad='ceil(iw/16)*16':'ceil(ih/2)*2':0:0:color=black")
+	}
+	return strings.Join(f, ",")
+}
+
+// padToAspect は num:den 比へ「収める」pad フィルタを返す（中央寄せ・黒帯）。
+func padToAspect(num, den int) string {
+	return fmt.Sprintf(
+		"pad=w='ceil(max(iw,ih*%[1]d/%[2]d)/16)*16':h='ceil(max(ih,iw*%[2]d/%[1]d)/2)*2':x='(ow-iw)/2':y='(oh-ih)/2':color=black",
+		num, den)
+}
+
+// parseAspect は "16:9" のような比率を num,den へ分解する。"" は ok=false。
+func parseAspect(s string) (num, den int, ok bool) {
+	i := strings.IndexByte(s, ':')
+	if i <= 0 {
+		return 0, 0, false
+	}
+	n, err1 := strconv.Atoi(s[:i])
+	d, err2 := strconv.Atoi(s[i+1:])
+	if err1 != nil || err2 != nil || n <= 0 || d <= 0 {
+		return 0, 0, false
+	}
+	return n, d, true
 }
 
 // プレビュー用の既定値（低解像度・低フレームレートで負荷を抑える）。

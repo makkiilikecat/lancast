@@ -101,6 +101,69 @@ func TestClientArgs_LowDelayOff(t *testing.T) {
 	}
 }
 
+func TestAlign16(t *testing.T) {
+	cases := map[int]int{0: 16, 8: 16, 1000: 1008, 1280: 1280, 1366: 1360, 1152: 1152}
+	for in, want := range cases {
+		if got := Align16(in); got != want {
+			t.Errorf("Align16(%d) = %d, want %d", in, got, want)
+		}
+	}
+}
+
+func TestPresetWidth(t *testing.T) {
+	// 16:10 の 720p → 1152（16 整列、比率維持）。
+	if got := PresetWidth(720, 1920, 1200); got != 1152 {
+		t.Errorf("PresetWidth(720,16:10) = %d, want 1152", got)
+	}
+	// 画面比不明なら 16:9 とみなす → 1280。
+	if got := PresetWidth(720, 0, 0); got != 1280 {
+		t.Errorf("PresetWidth(720,unknown) = %d, want 1280", got)
+	}
+}
+
+func TestHostArgs_Anamorphic_SetsDAR(t *testing.T) {
+	c := config.DefaultConfigFor("darwin").Host
+	c.Width, c.Height = 1280, 720 // 16:9
+	c.DARNum, c.DARDen = 1920, 1200 // 実画面 16:10
+	got := argStr(HostArgs(c))
+	if !strings.Contains(got, "setdar=1920/1200") {
+		t.Errorf("アナモルフィック時に setdar が無い: %s", got)
+	}
+}
+
+func TestHostArgs_NoAnamorphicWhenAspectMatches(t *testing.T) {
+	c := config.DefaultConfigFor("darwin").Host
+	c.Width, c.Height = 1280, 720
+	c.DARNum, c.DARDen = 1920, 1080 // 16:9 = 出力比と一致
+	if strings.Contains(argStr(HostArgs(c)), "setdar") {
+		t.Errorf("比率一致時に setdar を付けてはならない")
+	}
+}
+
+func TestClientArgs_RestoreAndPad(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client
+	c.RestoreAspect = true
+	c.TargetAspect = "16:9"
+	got := argStr(ClientArgs(c))
+	for _, want := range []string{
+		"-vf", "scale='trunc(iw*sar/2)*2':ih", "setsar=1",
+		"pad=w='ceil(max(iw,ih*16/9)/16)*16'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("期待する引数 %q が無い: %s", want, got)
+		}
+	}
+}
+
+func TestClientArgs_NoVFWhenDisabled(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client
+	c.RestoreAspect = false
+	c.TargetAspect = ""
+	if strings.Contains(argStr(ClientArgs(c)), "-vf") {
+		t.Errorf("復元も目標比率も無効なら -vf は付けない（従来挙動）")
+	}
+}
+
 func TestHostPreviewArgs(t *testing.T) {
 	c := config.DefaultConfigFor("darwin").Host
 	got := argStr(HostPreviewArgs(c, "tcp://127.0.0.1:5555"))

@@ -21,6 +21,12 @@ type HostConfig struct {
 	DestIP        string `json:"dest_ip"`
 	DestPort      int    `json:"dest_port"`
 	ExtraArgs     string `json:"extra_args"` // 追加 ffmpeg 引数（空白区切り）
+
+	// 送出フレームに埋め込む表示比（実画面比）。Width:Height と異なる場合、
+	// アナモルフィック（横方向に圧縮した映像＋表示比メタデータ）として送る。
+	// 0/0 は「自動」= Width:Height をそのまま使い、アナモルフィックにしない。
+	DARNum int `json:"dar_num"`
+	DARDen int `json:"dar_den"`
 }
 
 // ClientConfig は受信側（ネットワーク受信 → 仮想カメラ書き込み）の設定。
@@ -31,6 +37,13 @@ type ClientConfig struct {
 	FifoSize     int    `json:"fifo_size"`     // UDP 受信バッファ
 	LowDelay     bool   `json:"low_delay"`     // nobuffer + low_delay
 	ExtraArgs    string `json:"extra_args"`
+
+	// RestoreAspect は受信ストリームの SAR（送信側が埋めた実画面比）を読み、
+	// 正方ピクセルの実比率へ伸長し直してから仮想カメラへ流す。
+	RestoreAspect bool `json:"restore_aspect"`
+	// TargetAspect は仮想カメラへ出す前に、指定比率の枠へ収まるよう端を黒で
+	// 埋める（レターボックス/ピラーボックス）。"" は無加工。例: "16:9" "9:16"。
+	TargetAspect string `json:"target_aspect"`
 }
 
 // Config はアプリ全体の設定。
@@ -75,11 +88,12 @@ func DefaultConfigFor(goos string) Config {
 		host.Encoder = "libx264"
 	}
 	client := ClientConfig{
-		ListenPort:   5004,
-		OutputDevice: "/dev/video10",
-		PixFmt:       "yuv420p",
-		FifoSize:     1000000,
-		LowDelay:     true,
+		ListenPort:    5004,
+		OutputDevice:  "/dev/video10",
+		PixFmt:        "yuv420p",
+		FifoSize:      1000000,
+		LowDelay:      true,
+		RestoreAspect: true,
 	}
 	return Config{Host: host, Client: client}
 }
@@ -106,6 +120,19 @@ func (h HostConfig) Validate() string {
 	return ""
 }
 
+// TargetAspects は TargetAspect に指定できる値（"" = 無加工＝先頭）。
+// 横長に続けて縦長を並べる。UI のセレクタ順にも使う。
+var TargetAspects = []string{"", "16:9", "3:2", "4:3", "5:3", "9:16", "2:3", "3:4", "3:5"}
+
+func validTargetAspect(s string) bool {
+	for _, a := range TargetAspects {
+		if a == s {
+			return true
+		}
+	}
+	return false
+}
+
 // Validate は Client 設定が妥当か検査する。
 func (c ClientConfig) Validate() string {
 	switch {
@@ -117,6 +144,8 @@ func (c ClientConfig) Validate() string {
 		return "出力デバイスを入力してください"
 	case c.PixFmt == "":
 		return "ピクセル形式を入力してください"
+	case !validTargetAspect(c.TargetAspect):
+		return "目標比率の指定が不正です"
 	}
 	return ""
 }
