@@ -42,6 +42,21 @@ sudo modprobe v4l2loopback devices=1 video_nr=10 card_label=MacScreen exclusive_
 
 各タブの「実行コマンド」欄に実際の ffmpeg コマンドが表示される（コピー可）。不足依存があれば「依存 / Setup」タブに導入コマンドが出る。
 
+## インストール / アップデート
+
+アプリ一覧（mac=Launchpad/Spotlight、Ubuntu=GNOME アプリグリッド）から起動できるように
+インストールする。**アップデートは同じコマンドを再実行するだけ**（最新ソースから再ビルドして上書き）。
+
+```bash
+./scripts/install.sh
+```
+
+- macOS: `/Applications/LANCast.app`（カスタムアイコン付き）
+- Ubuntu (`i7-7700HQ.ud`): `~/.local/bin/lancast` + `~/.local/share/applications/lancast.desktop`
+
+mac で実行すると、ローカル(mac)と SSH 先の Linux の**両方**へインストールする。
+インストール先 Linux ホストは環境変数 `LINUX_SSH` で変更可（空にすると remote をスキップ）。
+
 ## ビルド / 起動（開発）
 
 ```bash

@@ -24,8 +24,19 @@ echo "  -> bin/lancast-${GOOS_LOCAL}-${GOARCH_LOCAL}"
 if [ "$GOOS_LOCAL" = "darwin" ]; then
   echo "== macOS .app bundle =="
   APP="bin/LANCast.app"
-  rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS"
+  rm -rf "$APP"; mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
   cp "bin/lancast-${GOOS_LOCAL}-${GOARCH_LOCAL}" "$APP/Contents/MacOS/lancast"
+
+  # assets/icon.png -> icon.icns（iconutil は標準搭載）。
+  if [ -f assets/icon.png ]; then
+    ICONSET="$(mktemp -d)/icon.iconset"; mkdir -p "$ICONSET"
+    for s in 16 32 64 128 256 512; do
+      sips -z $s $s assets/icon.png --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+      sips -z $((s*2)) $((s*2)) assets/icon.png --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+    done
+    iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/icon.icns"
+  fi
+
   cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -35,6 +46,7 @@ if [ "$GOOS_LOCAL" = "darwin" ]; then
   <key>CFBundleDisplayName</key><string>LANCast</string>
   <key>CFBundleExecutable</key><string>lancast</string>
   <key>CFBundleIdentifier</key><string>dev.makkii.lancast</string>
+  <key>CFBundleIconFile</key><string>icon</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>
   <key>NSHighResolutionCapable</key><true/>
