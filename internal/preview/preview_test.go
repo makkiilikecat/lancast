@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"image"
 	"image/jpeg"
+	"sync"
 	"testing"
 )
 
@@ -16,6 +17,26 @@ func encodeJPEG(t *testing.T) []byte {
 		t.Fatalf("encode: %v", err)
 	}
 	return b.Bytes()
+}
+
+// Start/Stop を並行に叩いても data race やリスナ/goroutine リークが無いこと
+// （go test -race で検証）。bin は即終了する true を使い、接続は発生させない。
+func TestStartStop_Concurrent(t *testing.T) {
+	p := New(func() {})
+	args := func(url string) []string { return []string{} }
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 20; j++ {
+				_ = p.Start("/usr/bin/true", args)
+				p.Stop()
+			}
+		}()
+	}
+	wg.Wait()
+	p.Stop()
 }
 
 // 連結された JPEG ストリームを SOI/EOI で正しく分割できること。

@@ -46,21 +46,32 @@ func (p *Preview) Frame() *image.RGBA {
 }
 
 // Start はローカル TCP を開いて待ち受け、argsFor(url) で ffmpeg を起動する。
+// p.ln を稼働中フラグ兼ねて mu 配下で扱い、二重起動・リスナ/goroutine の
+// リークを防ぐ（ln!=nil の間は起動済みとみなす）。
 func (p *Preview) Start(bin string, argsFor ArgsFunc) error {
-	if p.runner.Running() {
-		return nil
+	p.mu.Lock()
+	if p.ln != nil {
+		p.mu.Unlock()
+		return nil // 既に稼働中
 	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
+		p.mu.Unlock()
 		return err
 	}
 	p.ln = ln
+	p.mu.Unlock()
+
 	url := "tcp://" + ln.Addr().String()
 	go p.accept(ln)
 
 	if err := p.runner.Start(bin, argsFor(url)); err != nil {
+		p.mu.Lock()
+		if p.ln == ln {
+			p.ln = nil
+		}
+		p.mu.Unlock()
 		_ = ln.Close()
-		p.ln = nil
 		return err
 	}
 	return nil
@@ -68,10 +79,14 @@ func (p *Preview) Start(bin string, argsFor ArgsFunc) error {
 
 // Stop はプレビュー用 ffmpeg を停止し、リスナを閉じる。
 func (p *Preview) Stop() {
+	p.mu.Lock()
+	ln := p.ln
+	p.ln = nil
+	p.mu.Unlock()
+
 	p.runner.Stop()
-	if p.ln != nil {
-		_ = p.ln.Close()
-		p.ln = nil
+	if ln != nil {
+		_ = ln.Close() // accept の Accept がエラーで抜ける
 	}
 	p.mu.Lock()
 	p.frame = nil
