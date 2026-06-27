@@ -98,8 +98,12 @@ go run .
 # 自分の OS 向けバイナリ
 go build -o bin/lancast .
 
-# テスト
+# 単体テスト
 go test -race ./...
+
+# E2E（実機: Mac→Linux→/dev/video10 を通し、仮想カメラから1フレーム取得して検証）
+./scripts/e2e.sh                          # 既定 720p
+./scripts/e2e.sh --size 1920x1080 --bitrate 15000
 ```
 
 cgo を使うため**クロスコンパイルは避け、各 OS 上でネイティブビルド**する。
