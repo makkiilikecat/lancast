@@ -155,6 +155,21 @@ func TestClientArgs_RestoreAndPad(t *testing.T) {
 	}
 }
 
+func TestClientArgs_UserVFTakesPrecedence(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client
+	c.RestoreAspect = true
+	c.TargetAspect = "16:9"
+	c.ExtraArgs = "-vf hflip"
+	got := argStr(ClientArgs(c))
+	// ユーザーの -vf を優先し、本機能の復元/pad フィルタは付けない（二重 -vf 回避）。
+	if strings.Contains(got, "setsar=1") || strings.Contains(got, "pad=w=") {
+		t.Errorf("追加引数に -vf がある場合、本機能のフィルタを付けてはならない: %s", got)
+	}
+	if strings.Count(got, "-vf") != 1 {
+		t.Errorf("-vf が二重指定になっている: %s", got)
+	}
+}
+
 func TestClientArgs_NoVFWhenDisabled(t *testing.T) {
 	c := config.DefaultConfigFor("linux").Client
 	c.RestoreAspect = false

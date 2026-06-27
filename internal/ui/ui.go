@@ -617,6 +617,7 @@ func (a *App) clientTab(gtx C) D {
 				}),
 			)
 		}),
+		layout.Rigid(a.hint(a.clientFilterHint())),
 		layout.Rigid(a.field("追加引数", &a.cExtra)),
 		layout.Rigid(spacer(4)),
 		layout.Rigid(material.Body2(a.th, "実行コマンド:").Layout),
@@ -826,7 +827,7 @@ func (a *App) screenAspectHint() string {
 		return "プリセットは縦基準・横は画面比から自動算出（画面比は未検出のため 16:9 とみなします）。"
 	}
 	g := gcd(a.screenW, a.screenH)
-	return fmt.Sprintf("画面比 %d:%d（%d×%d）。プリセットは縦基準で横を自動算出します。",
+	return fmt.Sprintf("メイン画面比 %d:%d（%d×%d）。プリセットは縦基準で横を自動算出。別画面をキャプチャする場合は比が異なることがあります。",
 		a.screenW/g, a.screenH/g, a.screenW, a.screenH)
 }
 
@@ -841,6 +842,16 @@ func (a *App) anamorphicHint() string {
 		return "" // 画面比と一致（歪み無し）。
 	}
 	return "※ 現在の幅×高さは画面比と異なります。圧縮映像＋実画面比メタデータ（アナモルフィック）で送出し、受信側で復元します。"
+}
+
+// clientFilterHint は、追加引数の独自 -vf が復元/目標比率より優先される旨を
+// 該当時のみ知らせる。
+func (a *App) clientFilterHint() string {
+	c := a.assemble().Client
+	if (c.RestoreAspect || c.TargetAspect != "") && ffmpeg.HasVideoFilter(c.ExtraArgs) {
+		return "※ 追加引数に -vf があるため、アスペクト復元・目標比率は適用されません（追加引数を優先）。"
+	}
+	return ""
 }
 
 func gcd(a, b int) int {

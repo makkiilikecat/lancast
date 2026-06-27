@@ -180,14 +180,34 @@ func ClientArgs(c config.ClientConfig) []string {
 	url := fmt.Sprintf("udp://@:%d?fifo_size=%d&overrun_nonfatal=1", c.ListenPort, c.FifoSize)
 	args = append(args, "-i", url)
 
-	args = append(args, splitArgs(c.ExtraArgs)...)
+	extra := splitArgs(c.ExtraArgs)
+	args = append(args, extra...)
 
-	if vf := clientVF(c); vf != "" {
+	// ユーザーが追加引数で独自の映像フィルタを指定している場合、本機能の -vf と
+	// 二重指定になり ffmpeg は片方を黙って捨てる。衝突を避けるためユーザー指定を
+	// 優先し、本機能のフィルタは付けない（その旨は UI のヒントで周知する）。
+	if vf := clientVF(c); vf != "" && !hasVideoFilter(extra) {
 		args = append(args, "-vf", vf)
 	}
 
 	args = append(args, "-pix_fmt", c.PixFmt, "-f", "v4l2", c.OutputDevice)
 	return args
+}
+
+// HasVideoFilter は追加引数文字列に映像フィルタ指定が含まれるかを返す（UI 警告用）。
+func HasVideoFilter(extraArgs string) bool {
+	return hasVideoFilter(splitArgs(extraArgs))
+}
+
+// hasVideoFilter は引数列に映像フィルタ指定（-vf / -filter:v / -filter_complex）が
+// 含まれるかを返す。
+func hasVideoFilter(args []string) bool {
+	for _, a := range args {
+		if a == "-vf" || a == "-filter:v" || a == "-filter_complex" {
+			return true
+		}
+	}
+	return false
 }
 
 // clientVF は復元（SAR→正方ピクセル）と目標比率パディングのフィルタ鎖を組む。
