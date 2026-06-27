@@ -52,18 +52,20 @@ func main() {
 		os.Exit(2)
 	}
 
+	o := overrides{
+		dest: *dest, port: *port, device: *device, source: *source,
+		encoder: *encoder, bitrate: *bitrate, fps: *fps, size: *size,
+		fifo: *fifo, extra: *extra,
+	}
+
 	// 上書きフラグだけ指定して -host/-client を付け忘れた場合の注意喚起。
-	if !*host && !*client && overridesGiven(*dest, *device, *source, *encoder, *size, *extra, *port, *bitrate, *fps, *fifo) {
+	if !*host && !*client && o.any() {
 		fmt.Fprintln(os.Stderr, "[lancast] 注意: 上書きフラグが指定されましたが -host / -client が無いため GUI で起動します（ヘッドレスには -host か -client が必要）")
 	}
 
 	if *host || *client {
 		cfg, _ := config.Load()
-		applyOverrides(&cfg, overrides{
-			dest: *dest, port: *port, device: *device, source: *source,
-			encoder: *encoder, bitrate: *bitrate, fps: *fps, size: *size,
-			fifo: *fifo, extra: *extra,
-		})
+		applyOverrides(&cfg, o)
 		mode := cli.ModeHost
 		if *client {
 			mode = cli.ModeClient
@@ -114,15 +116,16 @@ Client(受信) 上書き:
 `)
 }
 
-// overridesGiven は上書きフラグが1つでも指定されたかを返す。
-func overridesGiven(dest, device, source, encoder, size, extra string, port, bitrate, fps, fifo int) bool {
-	return dest != "" || device != "" || source != "" || encoder != "" || size != "" || extra != "" ||
-		port != 0 || bitrate != 0 || fps != 0 || fifo != 0
-}
-
 type overrides struct {
 	dest, device, source, encoder, size, extra string
 	port, bitrate, fps, fifo                   int
+}
+
+// any は上書きフラグが1つでも指定されたかを返す。
+func (o overrides) any() bool {
+	return o.dest != "" || o.device != "" || o.source != "" || o.encoder != "" ||
+		o.size != "" || o.extra != "" ||
+		o.port != 0 || o.bitrate != 0 || o.fps != 0 || o.fifo != 0
 }
 
 // applyOverrides は指定された（非ゼロ・非空の）フラグだけを設定へ反映する。

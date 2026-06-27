@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -46,6 +47,13 @@ func (r *Runner) Log() string {
 	return strings.Join(r.lines, "\n")
 }
 
+// Lines は現在のログ行のコピーを返す（行単位で扱う UI 向け。join→split の往復を避ける）。
+func (r *Runner) Lines() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return slices.Clone(r.lines)
+}
+
 // Clear はログを消去する。
 func (r *Runner) Clear() {
 	r.mu.Lock()
@@ -59,7 +67,7 @@ func (r *Runner) append(line string) {
 	r.lines = append(r.lines, line)
 	if len(r.lines) > maxLogLines {
 		// 先頭を切り捨てつつ、古いバッキング配列を解放するためコピーし直す。
-		r.lines = append([]string(nil), r.lines[len(r.lines)-maxLogLines:]...)
+		r.lines = slices.Clone(r.lines[len(r.lines)-maxLogLines:])
 	}
 	r.mu.Unlock()
 	if r.OnLine != nil {
@@ -139,7 +147,9 @@ func (r *Runner) maybeHint(line string) {
 	switch {
 	case strings.Contains(line, "Address already in use"):
 		r.append("[ヒント] 前回の ffmpeg がポートを掴んだまま残っています。`lsof -iUDP:<port>` で確認し、残プロセスを終了してください。")
-	case strings.Contains(line, "Operation not permitted"), strings.Contains(line, "Configuration of video device failed"):
+	case strings.Contains(line, "Operation not permitted"):
+		// 注: "Configuration of video device failed, falling back to default" は
+		// avfoundation で毎回出る正常な警告のため、ここでは拾わない。
 		r.append("[ヒント] macOS は『システム設定>プライバシー>画面収録』で許可が必要です（許可後アプリ再起動）。")
 	}
 }

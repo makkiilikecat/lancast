@@ -18,7 +18,7 @@ LINUX_SSH="${LINUX_SSH:-i7-7700HQ.ud}"
 PORT="${PORT:-5004}"
 DEVICE="${DEVICE:-/dev/video10}"
 SIZE="1280x720"; FPS="30"; ENCODER="hevc_videotoolbox"; BITRATE="20000"
-WAIT_SECS="6"
+WAIT_SECS="8"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -93,9 +93,9 @@ HOST_PID=$!
 info "${WAIT_SECS}秒 ストリーム確立を待機"
 sleep "$WAIT_SECS"
 
-# 3) 送受信が進んでいるか（frame= ログ）
-grep -q "frame=" "$HOST_LOG" && ok "Host が送信中 (frame=)" || { ng "Host が送信していない"; tail -8 "$HOST_LOG"; }
-ssh "$LINUX_SSH" "grep -q 'frame=' /tmp/lc-e2e-client.log" && ok "Client が受信中 (frame=)" || { ng "Client が受信していない"; ssh "$LINUX_SSH" "tail -8 /tmp/lc-e2e-client.log"; }
+# 3) 送受信が確立したか（throttle されない「稼働中」マーカーで判定）
+grep -q "稼働中" "$HOST_LOG" && ok "Host が送信中（ストリーム稼働）" || { ng "Host が送信していない"; tail -8 "$HOST_LOG"; }
+ssh "$LINUX_SSH" "grep -q '稼働中' /tmp/lc-e2e-client.log" && ok "Client が受信中（ストリーム稼働）" || { ng "Client が受信していない"; ssh "$LINUX_SSH" "tail -8 /tmp/lc-e2e-client.log"; }
 
 # 4) 仮想カメラから1フレーム取得し検証
 info "仮想カメラ $DEVICE からフレーム取得・検証"

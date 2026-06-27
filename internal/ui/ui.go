@@ -428,7 +428,7 @@ func (a *App) hostTab(gtx C) D {
 		layout.Rigid(a.controlRow(&a.hStart, &a.hStop, &a.hClear, &a.hRecheck, ready, running)),
 		layout.Rigid(spacer(4)),
 		layout.Rigid(material.Body2(a.th, "ログ:").Layout),
-		layout.Flexed(1, a.logBox(&a.hLog, a.hostRunner.Log())),
+		layout.Flexed(1, a.logBox(&a.hLog, a.hostRunner.Lines())),
 	)
 }
 
@@ -458,7 +458,7 @@ func (a *App) clientTab(gtx C) D {
 		layout.Rigid(a.controlRow(&a.cStart, &a.cStop, &a.cClear, &a.cRecheck, ready, running)),
 		layout.Rigid(spacer(4)),
 		layout.Rigid(material.Body2(a.th, "ログ:").Layout),
-		layout.Flexed(1, a.logBox(&a.cLog, a.clientRunner.Log())),
+		layout.Flexed(1, a.logBox(&a.cLog, a.clientRunner.Lines())),
 	)
 }
 
@@ -615,11 +615,7 @@ func (a *App) gatedButton(btn *widget.Clickable, label string, enabled bool) fun
 	}
 }
 
-func (a *App) logBox(list *widget.List, logText string) func(C) D {
-	var lines []string
-	if logText != "" {
-		lines = strings.Split(logText, "\n")
-	}
+func (a *App) logBox(list *widget.List, lines []string) func(C) D {
 	return func(gtx C) D {
 		return widget.Border{
 			Color:        color.NRGBA{R: 0x77, G: 0x77, B: 0x77, A: 0xff},
