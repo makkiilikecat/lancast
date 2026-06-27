@@ -46,6 +46,19 @@ func TestResultOK(t *testing.T) {
 	}
 }
 
+func TestIsExecutable(t *testing.T) {
+	// /bin/sh は実行可能ファイルとして存在するはず。
+	if !isExecutable("/bin/sh") {
+		t.Error("/bin/sh が実行可能と判定されない")
+	}
+	if isExecutable("/bin") {
+		t.Error("ディレクトリが実行可能と誤判定された")
+	}
+	if isExecutable("/no/such/file") {
+		t.Error("存在しないパスが実行可能と誤判定された")
+	}
+}
+
 func TestDeviceNr(t *testing.T) {
 	if got := deviceNr("/dev/video10"); got != "10" {
 		t.Errorf("deviceNr=/dev/video10 -> %q", got)

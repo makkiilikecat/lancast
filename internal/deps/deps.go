@@ -97,9 +97,49 @@ func ParseModuleLoaded(procModules, name string) bool {
 // ---- 実環境アクセス ----
 
 // FFmpegPath は ffmpeg の絶対パスと存在可否を返す。
+//
+// macOS の GUI アプリは launchd の最小 PATH で起動され Homebrew の
+// /opt/homebrew/bin を含まないため、LookPath が失敗しても一般的な
+// インストール先を直接探索する。
 func FFmpegPath() (string, bool) {
-	p, err := exec.LookPath("ffmpeg")
-	return p, err == nil
+	if p, err := exec.LookPath("ffmpeg"); err == nil {
+		return p, true
+	}
+	for _, p := range commonFFmpegPaths() {
+		if isExecutable(p) {
+			return p, true
+		}
+	}
+	return "", false
+}
+
+// commonFFmpegPaths は OS 別の ffmpeg 既定インストール先候補を返す。
+func commonFFmpegPaths() []string {
+	switch runtime.GOOS {
+	case "darwin":
+		return []string{
+			"/opt/homebrew/bin/ffmpeg", // Apple Silicon Homebrew
+			"/usr/local/bin/ffmpeg",    // Intel Homebrew
+			"/opt/local/bin/ffmpeg",    // MacPorts
+			"/usr/bin/ffmpeg",
+		}
+	case "linux":
+		return []string{
+			"/usr/bin/ffmpeg",
+			"/usr/local/bin/ffmpeg",
+			"/snap/bin/ffmpeg",
+		}
+	default:
+		return nil
+	}
+}
+
+func isExecutable(p string) bool {
+	fi, err := os.Stat(p)
+	if err != nil || fi.IsDir() {
+		return false
+	}
+	return fi.Mode()&0o111 != 0
 }
 
 func ffmpegInstallHint() string {

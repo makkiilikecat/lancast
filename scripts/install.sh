@@ -19,8 +19,9 @@ LINUX_GO="${LINUX_GO:-/usr/local/go/bin/go}"
 install_linux_local() {
   echo "== install (Linux local) =="
   mkdir -p ~/.local/bin ~/.local/share/lancast ~/.local/share/applications
-  cp "bin/lancast-linux-$(go env GOARCH)" ~/.local/bin/lancast
-  chmod +x ~/.local/bin/lancast
+  # 稼働中でも上書きできるよう一時ファイル + atomic rename。
+  install -m755 "bin/lancast-linux-$(go env GOARCH)" ~/.local/bin/lancast.new
+  mv -f ~/.local/bin/lancast.new ~/.local/bin/lancast
   cp assets/icon.png ~/.local/share/lancast/icon.png
   cat > ~/.local/share/applications/lancast.desktop <<DESKTOP
 [Desktop Entry]
@@ -62,9 +63,10 @@ if [ -n "$LINUX_SSH" ] && ssh -o ConnectTimeout=6 "$LINUX_SSH" true 2>/dev/null;
   ssh "$LINUX_SSH" 'bash -s' <<'REMOTE'
 set -e
 mkdir -p ~/.local/bin ~/.local/share/lancast ~/.local/share/applications
-cp ~/lancast-src/lancast-linux-amd64 ~/.local/bin/lancast
-chmod +x ~/.local/bin/lancast
-mv /tmp/lancast-icon.png ~/.local/share/lancast/icon.png
+# 稼働中でも上書きできるよう一時ファイル + atomic rename。
+install -m755 ~/lancast-src/lancast-linux-amd64 ~/.local/bin/lancast.new
+mv -f ~/.local/bin/lancast.new ~/.local/bin/lancast
+mv -f /tmp/lancast-icon.png ~/.local/share/lancast/icon.png
 cat > ~/.local/share/applications/lancast.desktop <<DESKTOP
 [Desktop Entry]
 Type=Application
