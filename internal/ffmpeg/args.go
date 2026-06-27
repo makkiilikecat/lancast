@@ -24,9 +24,47 @@ func EncodersForOS(goos string) []string {
 	}
 }
 
-// splitArgs はユーザー追加引数を空白で分割する（簡易 shlex）。
+// splitArgs はユーザー追加引数を空白で分割する。引用符（' と "）で囲んだ値は
+// 1トークンとして扱い、内部の空白を保持する（簡易 shlex）。
 func splitArgs(s string) []string {
-	return strings.Fields(s)
+	var args []string
+	var cur strings.Builder
+	inTok := false
+	var quote rune // 0 / '\'' / '"'
+	for _, r := range s {
+		switch {
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				cur.WriteRune(r)
+			}
+		case r == '\'' || r == '"':
+			quote = r
+			inTok = true
+		case r == ' ' || r == '\t' || r == '\n':
+			if inTok {
+				args = append(args, cur.String())
+				cur.Reset()
+				inTok = false
+			}
+		default:
+			cur.WriteRune(r)
+			inTok = true
+		}
+	}
+	if inTok {
+		args = append(args, cur.String())
+	}
+	return args
+}
+
+// udpHost は IPv6 アドレスを URL 用に角括弧で囲む。
+func udpHost(ip string) string {
+	if strings.Contains(ip, ":") {
+		return "[" + ip + "]"
+	}
+	return ip
 }
 
 // encoderExtra はエンコーダ固有の低遅延向け既定引数を返す。
@@ -85,7 +123,7 @@ func HostArgs(c config.HostConfig) []string {
 
 	// 出力（MPEG-TS over UDP）。pkt_size=1316 は TS パケット7個ぶんで、
 	// 巨大データグラムによる断片化・欠落を避ける定石値。
-	args = append(args, "-f", "mpegts", fmt.Sprintf("udp://%s:%d?pkt_size=1316", c.DestIP, c.DestPort))
+	args = append(args, "-f", "mpegts", fmt.Sprintf("udp://%s:%d?pkt_size=1316", udpHost(c.DestIP), c.DestPort))
 	return args
 }
 
@@ -105,18 +143,23 @@ func ClientArgs(c config.ClientConfig) []string {
 	return args
 }
 
-// Preview は引数列を人間可読な単一行コマンドへ整形する（UI 表示用）。
+// Preview は引数列を人間可読な単一行コマンドへ整形する（表示・コピー用）。
+// シェルの特殊文字を含む引数は単一引用符で囲み、貼り付け時の誤展開を防ぐ。
 func Preview(bin string, args []string) string {
 	parts := make([]string, 0, len(args)+1)
-	parts = append(parts, bin)
+	parts = append(parts, shellQuote(bin))
 	for _, a := range args {
-		if strings.ContainsAny(a, " ?&") {
-			parts = append(parts, "\""+a+"\"")
-		} else {
-			parts = append(parts, a)
-		}
+		parts = append(parts, shellQuote(a))
 	}
 	return strings.Join(parts, " ")
+}
+
+func shellQuote(s string) string {
+	if s != "" && !strings.ContainsAny(s, " \t\n?&|;<>()$`\\\"'*") {
+		return s
+	}
+	// 単一引用符で囲み、内部の ' は '\'' でエスケープ。
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func boolArg(b bool) string {

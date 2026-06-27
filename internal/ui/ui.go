@@ -68,10 +68,11 @@ type App struct {
 	cPrevCache                             string
 	cLog                                   widget.List
 
-	setupRecheck widget.Clickable
-	gotoSetup    widget.Clickable
-	hostFix      [6]fixField
-	clientFix    [6]fixField
+	setupRecheck           widget.Clickable
+	hGotoSetup, cGotoSetup widget.Clickable
+	hMacPerm               widget.Clickable
+	hostFix                [6]fixField
+	clientFix              [6]fixField
 
 	hBackend string // OS 由来のキャプチャバックエンド（UI では編集しない）
 
@@ -235,7 +236,9 @@ func (a *App) startClient() {
 	}
 	if err := a.clientRunner.Start(a.ffmpegBin, ffmpeg.ClientArgs(cfg.Client)); err != nil {
 		a.status = "Client: " + err.Error()
+		return
 	}
+	a.status = "Client: 受信開始。この後 Discord を開き、カメラ「MacScreen」を選択してください。"
 }
 
 // Run はウィンドウのイベントループを回す。
@@ -302,8 +305,11 @@ func (a *App) handleEvents(gtx C) {
 	if r1 || r2 || r3 {
 		a.refreshDeps()
 	}
-	if a.gotoSetup.Clicked(gtx) {
+	if a.hGotoSetup.Clicked(gtx) || a.cGotoSetup.Clicked(gtx) {
 		a.cur = tabSetup
+	}
+	if a.hMacPerm.Clicked(gtx) {
+		openScreenRecordingSettings()
 	}
 }
 
@@ -324,10 +330,28 @@ func (a *App) layout(gtx C) D {
 			}),
 			layout.Rigid(spacer(6)),
 			layout.Rigid(func(gtx C) D {
+				l := material.Body2(a.th, a.runState())
+				l.Color = color.NRGBA{R: 0x55, G: 0xc0, B: 0x6a, A: 0xff}
+				return l.Layout(gtx)
+			}),
+			layout.Rigid(func(gtx C) D {
 				return material.Body2(a.th, a.status).Layout(gtx)
 			}),
 		)
 	})
+}
+
+// runState は Host/Client の稼働状態を1行で表す。
+func (a *App) runState() string {
+	h := "停止"
+	if a.hostRunner.Running() {
+		h = "● 配信中"
+	}
+	c := "停止"
+	if a.clientRunner.Running() {
+		c = "● 受信中"
+	}
+	return "Host: " + h + "   Client: " + c
 }
 
 func (a *App) tabBar(gtx C) D {
@@ -367,7 +391,8 @@ func (a *App) hostTab(gtx C) D {
 	running := a.hostRunner.Running()
 
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(a.warnIfNotReady(ready)),
+		layout.Rigid(a.warnIfNotReady(ready, &a.hGotoSetup)),
+		layout.Rigid(a.macPermRow()),
 		layout.Rigid(a.presetRow),
 		layout.Rigid(spacer(4)),
 		layout.Rigid(func(gtx C) D {
@@ -411,8 +436,13 @@ func (a *App) clientTab(gtx C) D {
 	ready := a.clientDeps.OK()
 	running := a.clientRunner.Running()
 
+	clientBanner := a.warnIfNotReady(ready, &a.cGotoSetup)
+	if runtime.GOOS != "linux" {
+		// 受信は Linux 専用。Setup では直せないので警告ではなく説明を出す。
+		clientBanner = a.infoBanner("ℹ この PC は送信(Host)専用です。受信は Ubuntu 機の LANCast で行ってください（v4l2loopback は Linux のみ）。")
+	}
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-		layout.Rigid(a.warnIfNotReady(ready)),
+		layout.Rigid(clientBanner),
 		layout.Rigid(a.field("受信ポート", &a.cPort)),
 		layout.Rigid(a.field("バッファ(fifo_size)", &a.cFifo)),
 		layout.Rigid(a.field("出力デバイス", &a.cDevice)),
@@ -468,14 +498,33 @@ func (a *App) checksView(r *deps.Result, fix []fixField) func(C) D {
 // ---- 小さな部品 ----
 
 // warnIfNotReady は依存未充足時に、クリックで Setup タブへ飛ぶ警告ボタンを描く。
-func (a *App) warnIfNotReady(ready bool) func(C) D {
+func (a *App) warnIfNotReady(ready bool, btn *widget.Clickable) func(C) D {
 	return func(gtx C) D {
 		if ready {
 			return D{}
 		}
-		b := material.Button(a.th, &a.gotoSetup, "⚠ 依存が未充足です — タップして Setup を開く")
+		b := material.Button(a.th, btn, "⚠ 依存が未充足です — タップして Setup を開く")
 		b.Background = color.NRGBA{R: 0xa0, G: 0x55, B: 0x20, A: 0xff}
 		return b.Layout(gtx)
+	}
+}
+
+// infoBanner は青色の情報バナー（操作不能の理由説明など）を描く。
+func (a *App) infoBanner(msg string) func(C) D {
+	return func(gtx C) D {
+		l := material.Body2(a.th, msg)
+		l.Color = color.NRGBA{R: 0x6a, G: 0x9a, B: 0xff, A: 0xff}
+		return l.Layout(gtx)
+	}
+}
+
+// macPermRow は macOS でのみ「画面収録の許可」設定を開くボタンを描く。
+func (a *App) macPermRow() func(C) D {
+	return func(gtx C) D {
+		if runtime.GOOS != "darwin" {
+			return D{}
+		}
+		return material.Button(a.th, &a.hMacPerm, "画面収録を許可（システム設定を開く）").Layout(gtx)
 	}
 }
 
@@ -567,7 +616,10 @@ func (a *App) gatedButton(btn *widget.Clickable, label string, enabled bool) fun
 }
 
 func (a *App) logBox(list *widget.List, logText string) func(C) D {
-	lines := strings.Split(logText, "\n")
+	var lines []string
+	if logText != "" {
+		lines = strings.Split(logText, "\n")
+	}
 	return func(gtx C) D {
 		return widget.Border{
 			Color:        color.NRGBA{R: 0x77, G: 0x77, B: 0x77, A: 0xff},

@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"runtime"
 	"strings"
+	"sync"
 
 	"lancast/internal/config"
 )
@@ -129,6 +130,11 @@ func commonFFmpegPaths() []string {
 			"/usr/local/bin/ffmpeg",
 			"/snap/bin/ffmpeg",
 		}
+	case "windows":
+		return []string{
+			`C:\Program Files\ffmpeg\bin\ffmpeg.exe`,
+			`C:\ffmpeg\bin\ffmpeg.exe`,
+		}
 	default:
 		return nil
 	}
@@ -173,8 +179,20 @@ func availableFrom(candidates []string, avail map[string]bool) []string {
 	return out
 }
 
+var (
+	encMu    sync.Mutex
+	encCache map[string]bool
+)
+
 // availableEncoders は ffmpeg を実行してエンコーダ集合を返す。ffmpeg 不在時は空。
+// `ffmpeg -encoders` は数百ms かかるため結果をキャッシュする（UI スレッドのブロック回避）。
+// 取得に成功（非空）するまではキャッシュせず、再チェックのたびに再試行する。
 func availableEncoders() map[string]bool {
+	encMu.Lock()
+	defer encMu.Unlock()
+	if encCache != nil {
+		return encCache
+	}
 	bin, ok := FFmpegPath()
 	if !ok {
 		return map[string]bool{}
@@ -183,7 +201,11 @@ func availableEncoders() map[string]bool {
 	if err != nil {
 		return map[string]bool{}
 	}
-	return ParseEncoders(string(out))
+	m := ParseEncoders(string(out))
+	if len(m) > 0 {
+		encCache = m
+	}
+	return m
 }
 
 func moduleLoaded(name string) bool {
@@ -205,7 +227,7 @@ func CheckHost(c config.HostConfig) Result {
 		fix := ""
 		if !has {
 			if avail := availableFrom(commonEncoders, encs); len(avail) > 0 {
-				fix = "この ffmpeg で利用可能: " + strings.Join(avail, ", ") + " のいずれかを選択してください"
+				fix = "Host タブの『エンコーダ』を次のいずれかに変更してください: " + strings.Join(avail, ", ")
 			} else {
 				fix = "対応エンコーダを含む ffmpeg をインストールしてください"
 			}
@@ -213,8 +235,17 @@ func CheckHost(c config.HostConfig) Result {
 		checks = append(checks, Check{
 			Name:   "encoder: " + c.Encoder,
 			OK:     has,
-			Detail: okText(has, "利用可能", "この ffmpeg では非対応"),
+			Detail: okText(has, "利用可能（映像エンコードに使用）", "この ffmpeg では非対応"),
 			Fix:    fix,
+		})
+	}
+
+	if runtime.GOOS == "darwin" {
+		// 厳密な許可状態は判定困難なため、情報表示（常に OK）として注意を促す。
+		checks = append(checks, Check{
+			Name:   "画面収録の許可 (macOS)",
+			OK:     true,
+			Detail: "初回は システム設定>プライバシーとセキュリティ>画面収録 で許可が必要（許可後アプリ再起動）。アプリ版とコマンド実行で許可は別管理。",
 		})
 	}
 
@@ -241,20 +272,23 @@ func CheckClient(c config.ClientConfig) Result {
 		checks = append(checks, Check{
 			Name:   "v4l2loopback",
 			OK:     false,
-			Detail: "v4l2loopback は Linux 専用です（このOSでは受信→仮想カメラは未対応）",
-			Fix:    "Client モードは Linux で実行してください",
+			Detail: "v4l2loopback は Linux 専用です。この PC は送信(Host)専用で、受信(Discord に映す側)は Ubuntu 機で行ってください。",
+			Fix:    "", // この OS では解消不能なため修正コマンドは出さない
 		})
 		return Result{Checks: checks}
 	}
 
 	dev := c.OutputDevice
 	nr := deviceNr(dev)
+	// 同一の modprobe コマンドを module 未ロード・device 不在の両方に提示する。
+	modprobeCmd := "sudo modprobe v4l2loopback devices=1 video_nr=" + nr + " card_label=MacScreen exclusive_caps=1"
 	loaded := moduleLoaded("v4l2loopback")
 	checks = append(checks, Check{
-		Name:   "v4l2loopback module",
-		OK:     loaded,
-		Detail: okText(loaded, "ロード済み", "未ロード"),
-		Fix:    fixIf(!loaded, "sudo modprobe v4l2loopback devices=1 video_nr="+nr+" card_label=MacScreen exclusive_caps=1  （未インストールなら kernel 6.17+ は git 0.15+ を DKMS 導入。Discord/Chrome に出ない時は exclusive_caps=1 を付け外し両方試す）"),
+		Name: "v4l2loopback module",
+		OK:   loaded,
+		Detail: okText(loaded, "ロード済み（受信映像を仮想カメラとして見せるために必要）",
+			"未ロード。未インストールなら kernel 6.17+ は git 0.15+ を DKMS 導入。ロード後も Discord/Chrome に出ない時は exclusive_caps を付け外しして再ロード。"),
+		Fix: fixIf(!loaded, modprobeCmd),
 	})
 
 	_, statErr := os.Stat(dev)
@@ -263,7 +297,7 @@ func CheckClient(c config.ClientConfig) Result {
 		Name:   "device: " + dev,
 		OK:     devExists,
 		Detail: okText(devExists, "存在します", "存在しません"),
-		Fix:    fixIf(!devExists, "sudo modprobe v4l2loopback video_nr="+deviceNr(dev)+" exclusive_caps=1"),
+		Fix:    fixIf(!devExists, modprobeCmd),
 	})
 
 	if devExists {
@@ -279,13 +313,27 @@ func CheckClient(c config.ClientConfig) Result {
 	return Result{Checks: checks}
 }
 
-// deviceNr は "/dev/video10" から "10" を取り出す（取れなければ "10"）。
+// deviceNr は "/dev/video10" から "10" を取り出す（数字で取れなければ "10"）。
 func deviceNr(dev string) string {
 	const p = "/dev/video"
 	if strings.HasPrefix(dev, p) {
-		return dev[len(p):]
+		if n := dev[len(p):]; isAllDigits(n) {
+			return n
+		}
 	}
 	return "10"
+}
+
+func isAllDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 // ---- 表示ヘルパ ----

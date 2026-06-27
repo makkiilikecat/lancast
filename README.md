@@ -40,7 +40,21 @@ sudo modprobe v4l2loopback devices=1 video_nr=10 card_label=MacScreen exclusive_
 
 `LANCast` を起動 → **Host (送信)** タブ → 送信先 IP を受信側に設定 → **開始**。
 
+> **macOS 初回のみ**: 「システム設定 > プライバシーとセキュリティ > 画面収録」で **LANCast**（コマンド実行時はターミナル）を許可し、アプリを再起動すること。未許可だと黒画面/失敗になる。Host タブの「画面収録を許可（システム設定を開く）」ボタンから直接開ける。
+
 各タブの「実行コマンド」欄に実際の ffmpeg コマンドが表示される（コピー可）。不足依存があれば「依存 / Setup」タブに導入コマンドが出る。
+
+> 本書中の IP・ホスト名（`192.168.0.215` / `i7-7700HQ.ud` 等）は筆者環境の例。自分の環境に読み替えること（受信側 Ubuntu の IP は `hostname -I` で確認）。
+
+## トラブルシューティング
+
+| 症状 | 原因 / 対処 |
+|---|---|
+| Discord のカメラ一覧に「MacScreen」が出ない | **受信(Client)を先に開始**してから Discord を開く（`exclusive_caps=1` のため writer 接続後にのみ Capture 化）。出ない場合は `sudo modprobe -r v4l2loopback` 後に `exclusive_caps` を付け外しして再ロード。Discord 再起動も有効 |
+| `VIDIOC_G_FMT: Invalid argument`（受信側） | apt 版 v4l2loopback 0.12.x が kernel 6.17 と非互換。git 版 0.15+ を DKMS 導入 |
+| `Address already in use`（受信側） | 前回の ffmpeg がポートを掴んだまま。`lsof -iUDP:5004` で確認し残プロセスを終了（`pkill -f 'ffmpeg.*5004'`） |
+| Mac で黒画面/`Configuration of video device failed` | 画面収録の許可が未設定。手順3の許可後にアプリ再起動 |
+| ffmpeg が「見つかりません」 | `brew install ffmpeg`（mac）/ `sudo apt install ffmpeg`（Linux）。GUI 版は Homebrew パスも自動探索する |
 
 ## インストール / アップデート
 

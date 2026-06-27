@@ -66,4 +66,10 @@ func TestDeviceNr(t *testing.T) {
 	if got := deviceNr("weird"); got != "10" {
 		t.Errorf("deviceNr フォールバックが効かない: %q", got)
 	}
+	if got := deviceNr("/dev/videoX"); got != "10" {
+		t.Errorf("非数字サフィックスでフォールバックしない: %q", got)
+	}
+	if got := deviceNr("/dev/video0"); got != "0" {
+		t.Errorf("deviceNr=/dev/video0 -> %q", got)
+	}
 }

@@ -112,8 +112,40 @@ func TestEncodersForOS(t *testing.T) {
 
 func TestPreview_QuotesSpecialChars(t *testing.T) {
 	got := Preview("ffmpeg", []string{"-i", "udp://@:5004?fifo_size=1"})
-	if !strings.Contains(got, "\"udp://@:5004?fifo_size=1\"") {
+	if !strings.Contains(got, "'udp://@:5004?fifo_size=1'") {
 		t.Errorf("特殊文字を含む引数が引用されていない: %s", got)
+	}
+	// 通常の引数は引用しない。
+	if !strings.Contains(got, "ffmpeg -i ") {
+		t.Errorf("通常引数が不必要に引用されている: %s", got)
+	}
+}
+
+func TestSplitArgs(t *testing.T) {
+	cases := []struct {
+		in   string
+		want []string
+	}{
+		{"", nil},
+		{"-g 60 -bf 0", []string{"-g", "60", "-bf", "0"}},
+		{`-x264-params "keyint=60:bframes=0"`, []string{"-x264-params", "keyint=60:bframes=0"}},
+		{`-metadata title='foo bar'`, []string{"-metadata", "title=foo bar"}},
+		{"  a   b  ", []string{"a", "b"}},
+	}
+	for _, c := range cases {
+		got := splitArgs(c.in)
+		if strings.Join(got, "|") != strings.Join(c.want, "|") {
+			t.Errorf("splitArgs(%q)=%v want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestHostArgs_IPv6Bracket(t *testing.T) {
+	c := config.DefaultConfigFor("darwin").Host
+	c.DestIP = "fe80::1"
+	got := argStr(HostArgs(c))
+	if !strings.Contains(got, "udp://[fe80::1]:5004") {
+		t.Errorf("IPv6 が角括弧で囲まれていない: %s", got)
 	}
 }
 

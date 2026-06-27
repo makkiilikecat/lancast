@@ -58,7 +58,8 @@ func (r *Runner) append(line string) {
 	r.mu.Lock()
 	r.lines = append(r.lines, line)
 	if len(r.lines) > maxLogLines {
-		r.lines = r.lines[len(r.lines)-maxLogLines:]
+		// 先頭を切り捨てつつ、古いバッキング配列を解放するためコピーし直す。
+		r.lines = append([]string(nil), r.lines[len(r.lines)-maxLogLines:]...)
 	}
 	r.mu.Unlock()
 	if r.OnLine != nil {
@@ -122,12 +123,24 @@ func (r *Runner) pump(rc io.ReadCloser) {
 		}
 		if b == '\n' || b == '\r' {
 			if buf.Len() > 0 {
-				r.append(buf.String())
+				line := buf.String()
+				r.append(line)
+				r.maybeHint(line)
 				buf.Reset()
 			}
 			continue
 		}
 		buf.WriteByte(b)
+	}
+}
+
+// maybeHint は ffmpeg の代表的なエラーに対し、人間向けの対処ヒントを補う。
+func (r *Runner) maybeHint(line string) {
+	switch {
+	case strings.Contains(line, "Address already in use"):
+		r.append("[ヒント] 前回の ffmpeg がポートを掴んだまま残っています。`lsof -iUDP:<port>` で確認し、残プロセスを終了してください。")
+	case strings.Contains(line, "Operation not permitted"), strings.Contains(line, "Configuration of video device failed"):
+		r.append("[ヒント] macOS は『システム設定>プライバシー>画面収録』で許可が必要です（許可後アプリ再起動）。")
 	}
 }
 
@@ -163,7 +176,9 @@ func (r *Runner) Stop() {
 	go func(target *exec.Cmd) {
 		time.Sleep(2 * time.Second)
 		r.mu.Lock()
-		same := r.running && r.cmd == target
+		// 同一プロセスがまだ現役なら強制終了。wait() 完了で r.cmd は nil に
+		// 入れ替わるため、ポインタ一致のみで判定すれば誤殺・取りこぼしを防げる。
+		same := r.cmd == target
 		r.mu.Unlock()
 		if same {
 			killCmd(target)

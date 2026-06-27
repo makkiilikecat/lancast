@@ -145,6 +145,8 @@ func Load() (Config, error) {
 	}
 	cfg := DefaultConfig()
 	if err := json.Unmarshal(b, &cfg); err != nil {
+		// 破損設定は .bak へ退避してから既定値を返す（次回 Save での無言上書き＝消失を防ぐ）。
+		_ = os.Rename(p, p+".bak")
 		return DefaultConfig(), err
 	}
 	return cfg, nil

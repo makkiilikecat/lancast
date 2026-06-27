@@ -20,27 +20,41 @@ import (
 	"lancast/internal/ui"
 )
 
+const version = "0.1.0"
+
 func main() {
 	var (
 		host    = flag.Bool("host", false, "ヘッドレスで Host(送信)を即時起動")
 		client  = flag.Bool("client", false, "ヘッドレスで Client(受信)を即時起動")
-		debug   = flag.Bool("debug", false, "詳細ログを標準出力へ")
-		dest    = flag.String("dest", "", "送信先IP (host)")
-		port    = flag.Int("port", 0, "ポート (host=送信先 / client=受信)")
-		device  = flag.String("device", "", "出力デバイス (client) 例 /dev/video10")
-		source  = flag.String("source", "", "キャプチャ入力 (host) 例 3:none, :0.0")
-		encoder = flag.String("encoder", "", "エンコーダ (host) 例 hevc_videotoolbox")
-		bitrate = flag.Int("bitrate", 0, "ビットレート kbps (host)")
-		fps     = flag.Int("fps", 0, "FPS (host)")
-		size    = flag.String("size", "", "解像度 WxH (host) 例 1280x720")
-		fifo    = flag.Int("fifo", 0, "fifo_size (client)")
-		extra   = flag.String("extra", "", "ffmpeg 追加引数")
+		debug   = flag.Bool("debug", false, "詳細ログ（設定内容・依存チェック）を出力")
+		showVer = flag.Bool("version", false, "バージョンを表示して終了")
+		dest    = flag.String("dest", "", "送信先 `IP` (host)")
+		port    = flag.Int("port", 0, "`ポート` (host=送信先 / client=受信)")
+		device  = flag.String("device", "", "出力 `デバイス` (client) 例 /dev/video10")
+		source  = flag.String("source", "", "キャプチャ `入力` (host) 例 3:none, :0.0")
+		encoder = flag.String("encoder", "", "`エンコーダ` (host) 例 hevc_videotoolbox")
+		bitrate = flag.Int("bitrate", 0, "ビットレート `kbps` (host)")
+		fps     = flag.Int("fps", 0, "`FPS` (host)")
+		size    = flag.String("size", "", "解像度 `WxH` (host) 例 1280x720")
+		fifo    = flag.Int("fifo", 0, "受信バッファ `fifo_size` (client)")
+		extra   = flag.String("extra", "", "ffmpeg 追加 `引数`")
 	)
+	flag.Usage = usage
 	flag.Parse()
 
+	if *showVer {
+		fmt.Println("lancast", version)
+		return
+	}
+
 	if *host && *client {
-		fmt.Fprintln(os.Stderr, "-host と -client は同時に指定できません")
+		fmt.Fprintln(os.Stderr, "[lancast] -host と -client は同時に指定できません")
 		os.Exit(2)
+	}
+
+	// 上書きフラグだけ指定して -host/-client を付け忘れた場合の注意喚起。
+	if !*host && !*client && overridesGiven(*dest, *device, *source, *encoder, *size, *extra, *port, *bitrate, *fps, *fifo) {
+		fmt.Fprintln(os.Stderr, "[lancast] 注意: 上書きフラグが指定されましたが -host / -client が無いため GUI で起動します（ヘッドレスには -host か -client が必要）")
 	}
 
 	if *host || *client {
@@ -68,6 +82,42 @@ func main() {
 		os.Exit(0)
 	}()
 	app.Main()
+}
+
+func usage() {
+	d := config.DefaultConfig()
+	fmt.Fprint(os.Stderr, `lancast `+version+` — LAN 画面キャスト (送信=host / 受信=client)
+
+使い方:
+  lancast                 GUI を起動
+  lancast -host           送信(Host)をヘッドレス即時起動
+  lancast -client         受信(Client)をヘッドレス即時起動
+
+モード (排他):
+  -host       送信(Host)を即時起動
+  -client     受信(Client)を即時起動
+
+共通:
+  -debug      詳細ログ（設定内容・依存チェック）
+  -extra ARG  ffmpeg 追加引数
+  -version    バージョン表示
+
+Host(送信) 上書き:
+  -dest IP -port N -source SPEC -encoder NAME -bitrate KBPS -fps N -size WxH
+
+Client(受信) 上書き:
+  -port N -device PATH -fifo N
+
+省略時は保存済み設定、無ければ既定値を使用。
+  現在の既定値(host):   size=`+fmt.Sprintf("%dx%d fps=%d bitrate=%dk encoder=%s", d.Host.Width, d.Host.Height, d.Host.FPS, d.Host.Bitrate, d.Host.Encoder)+`
+  現在の既定値(client): port=`+fmt.Sprintf("%d device=%s", d.Client.ListenPort, d.Client.OutputDevice)+`
+`)
+}
+
+// overridesGiven は上書きフラグが1つでも指定されたかを返す。
+func overridesGiven(dest, device, source, encoder, size, extra string, port, bitrate, fps, fifo int) bool {
+	return dest != "" || device != "" || source != "" || encoder != "" || size != "" || extra != "" ||
+		port != 0 || bitrate != 0 || fps != 0 || fifo != 0
 }
 
 type overrides struct {
