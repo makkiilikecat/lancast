@@ -10,6 +10,7 @@ import (
 	"sync"
 
 	"lancast/internal/config"
+	"lancast/internal/macperm"
 )
 
 // Check は単一の依存チェック結果。
@@ -241,11 +242,15 @@ func CheckHost(c config.HostConfig) Result {
 	}
 
 	if runtime.GOOS == "darwin" {
-		// 厳密な許可状態は判定困難なため、情報表示（常に OK）として注意を促す。
+		// CoreGraphics の公開 API で許可状態を判定する（モーダルは出さない）。
+		granted := macperm.Granted()
 		checks = append(checks, Check{
-			Name:   "画面収録の許可 (macOS)",
-			OK:     true,
-			Detail: "初回は システム設定>プライバシーとセキュリティ>画面収録 で許可が必要（許可後アプリ再起動）。アプリ版とコマンド実行で許可は別管理。",
+			Name: "画面収録の許可 (macOS)",
+			OK:   granted,
+			Detail: okText(granted,
+				"許可済み",
+				"未許可。Host タブの『画面収録を許可』ボタンで許可してください（許可後アプリ再起動）。アプリ版とコマンド実行で許可は別管理。"),
+			Fix: fixIf(!granted, "システム設定>プライバシーとセキュリティ>画面収録 でこのアプリを許可（許可後アプリ再起動）"),
 		})
 	}
 

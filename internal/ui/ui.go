@@ -24,6 +24,7 @@ import (
 	"lancast/internal/config"
 	"lancast/internal/deps"
 	"lancast/internal/ffmpeg"
+	"lancast/internal/macperm"
 	"lancast/internal/runner"
 )
 
@@ -213,6 +214,14 @@ func (a *App) startHost() {
 		return
 	}
 	_ = config.Save(cfg)
+	// 起動前にアプリ自身が許可状態を確認する。これにより画面収録の責任プロセスを
+	// アプリに固定し、許可済みなら ffmpeg 起動時にモーダルが再表示されるのを防ぐ。
+	// 未許可のときだけ明示的にモーダルを出す。
+	if runtime.GOOS == "darwin" && !macperm.Granted() {
+		macperm.Request()
+		a.status = "Host: 画面収録が未許可です。許可後、アプリを再起動して再度開始してください。"
+		return
+	}
 	a.refreshDeps()
 	if !a.hostDeps.OK() {
 		a.status = "Host: 依存が未充足です（Setup タブ参照）"
@@ -333,7 +342,12 @@ func (a *App) handleEvents(gtx C) {
 		a.cur = tabSetup
 	}
 	if a.hMacPerm.Clicked(gtx) {
-		openScreenRecordingSettings()
+		// 未許可なら OS の許可モーダルを直接出す。既に許可済み（あるいは一度
+		// 拒否済みでモーダルが二度と出ない状態）ならシステム設定を開く。
+		if macperm.Granted() || macperm.Request() {
+			openScreenRecordingSettings()
+		}
+		a.refreshDeps()
 	}
 }
 
@@ -548,7 +562,12 @@ func (a *App) macPermRow() func(C) D {
 		if runtime.GOOS != "darwin" {
 			return D{}
 		}
-		return material.Button(a.th, &a.hMacPerm, "画面収録を許可（システム設定を開く）").Layout(gtx)
+		if macperm.Granted() {
+			l := material.Body2(a.th, "● 画面収録: 許可済み")
+			l.Color = color.NRGBA{R: 0x55, G: 0xc0, B: 0x6a, A: 0xff}
+			return l.Layout(gtx)
+		}
+		return material.Button(a.th, &a.hMacPerm, "画面収録を許可（未許可）").Layout(gtx)
 	}
 }
 
