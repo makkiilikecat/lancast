@@ -19,12 +19,22 @@ import (
 
 	"lancast/internal/cli"
 	"lancast/internal/config"
+	"lancast/internal/runner"
 	"lancast/internal/ui"
 )
 
 const version = "0.1.0"
 
 func main() {
+	// 親監視 watchdog として re-exec された場合のディスパッチ（最優先）。
+	// flag.Parse より前に処理し、専用引数で即 RunWatchdog へ入る（GUI/ヘッドレスは起動しない）。
+	if len(os.Args) >= 4 && os.Args[1] == runner.WatchdogArg {
+		ppid, _ := strconv.Atoi(os.Args[2])
+		cpid, _ := strconv.Atoi(os.Args[3])
+		runner.RunWatchdog(ppid, cpid)
+		return
+	}
+
 	var (
 		host    = flag.Bool("host", false, "ヘッドレスで Host(送信)を即時起動")
 		client  = flag.Bool("client", false, "ヘッドレスで Client(受信)を即時起動")
@@ -79,8 +89,8 @@ func main() {
 	a := ui.NewApp()
 
 	// SIGINT/SIGTERM を捕捉し、ffmpeg を停止してから終了する。
-	// （OOM/SIGKILL のような捕捉不能な強制終了に対しては、runner の Pdeathsig が
-	//  カーネルレベルで ffmpeg を道連れにする安全網となる。）
+	// （OOM/SIGKILL のような捕捉不能な強制終了に対しては、Linux は runner の Pdeathsig、
+	//  macOS は runner が起動する watchdog プロセスが ffmpeg を道連れにする安全網となる。）
 	go func() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, os.Interrupt, syscall.SIGTERM)

@@ -105,6 +105,10 @@ func (r *Runner) Start(bin string, args []string) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
+	// macOS には Pdeathsig 相当が無いため、親(lancast)が後始末コードを走らせずに
+	// 死んでも ffmpeg を道連れにできるよう、親の終了を監視する watchdog を別プロセス
+	// として起動する（darwin のみ実体あり。それ以外は no-op）。
+	wdStop := spawnWatchdog(cmd.Process.Pid)
 
 	r.mu.Lock()
 	r.cmd = cmd
@@ -114,7 +118,7 @@ func (r *Runner) Start(bin string, args []string) error {
 
 	go r.pump(stderr)
 	go r.pump(stdout)
-	go r.wait(cmd)
+	go r.wait(cmd, wdStop)
 	return nil
 }
 
@@ -175,8 +179,11 @@ func describeExitError(err error) string {
 	return err.Error()
 }
 
-func (r *Runner) wait(cmd *exec.Cmd) {
+func (r *Runner) wait(cmd *exec.Cmd, wdStop func()) {
 	err := cmd.Wait()
+	if wdStop != nil {
+		wdStop() // ffmpeg は終了したので watchdog を停止・回収する
+	}
 	r.mu.Lock()
 	r.running = false
 	r.cmd = nil
