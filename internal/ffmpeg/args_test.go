@@ -1,7 +1,6 @@
 package ffmpeg
 
 import (
-	"fmt"
 	"strings"
 	"testing"
 
@@ -21,12 +20,46 @@ func TestHostArgs_AVFoundation_NoFramerateAtInput(t *testing.T) {
 	}
 	for _, want := range []string{
 		"-f avfoundation", "-capture_cursor 1", "-i 3:none",
-		"scale=1280:720,fps=30", "-c:v hevc_videotoolbox", "-b:v 20000k",
+		"-c:v hevc_videotoolbox", "-b:v 20000k",
 		"-realtime 1", "-tag:v hvc1", "-an",
 		"-f mpegts udp://192.168.0.215:5004?pkt_size=1316",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("期待する引数 %q が無い: %s", want, got)
+		}
+	}
+}
+
+func TestHostArgs_VideotoolboxUsesGPUScale(t *testing.T) {
+	// avfoundation×VideoToolbox では GPU スケール経路（nv12 直取り + hwupload + scale_vt）。
+	c := config.DefaultConfigFor("darwin").Host
+	got := argStr(HostArgs(c))
+	for _, want := range []string{
+		"-init_hw_device videotoolbox",
+		"-f avfoundation -pixel_format nv12",
+		"-vf fps=30,hwupload,scale_vt=1280:720",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("GPU スケール経路に期待する引数 %q が無い: %s", want, got)
+		}
+	}
+	// CPU の swscale 経路（scale=W:H,fps）は出てはならない。
+	if strings.Contains(got, "scale=1280:720,fps=30") {
+		t.Errorf("VideoToolbox なのに CPU swscale 経路が混入: %s", got)
+	}
+}
+
+func TestHostArgs_SoftwareEncoderKeepsCPUScale(t *testing.T) {
+	// libx264 等のソフトエンコーダでは GPU 往復は無意味なため従来の CPU スケールを維持する。
+	c := config.DefaultConfigFor("darwin").Host
+	c.Encoder = "libx264"
+	got := argStr(HostArgs(c))
+	if !strings.Contains(got, "-vf scale=1280:720,fps=30") {
+		t.Errorf("ソフトエンコーダで CPU スケール経路が無い: %s", got)
+	}
+	for _, ng := range []string{"-init_hw_device", "hwupload", "scale_vt", "-pixel_format"} {
+		if strings.Contains(got, ng) {
+			t.Errorf("ソフトエンコーダに GPU 専用引数 %q が混入: %s", ng, got)
 		}
 	}
 }
@@ -93,159 +126,41 @@ func TestClientArgs(t *testing.T) {
 	}
 }
 
-func TestClientArgs_FPSSetsCFR(t *testing.T) {
+func TestClientArgs_NoScalingNoRate(t *testing.T) {
+	// 受信は無加工: スケール/FPS 正規化/アスペクト処理は一切しない。
 	c := config.DefaultConfigFor("linux").Client
-	c.FPS = 60
 	got := argStr(ClientArgs(c))
-	// CFR 化（-vf 内 fps）と出力レート固定（-r）の両方が付く。
-	for _, want := range []string{"fps=60", "-r 60", "-f v4l2 /dev/video10"} {
-		if !strings.Contains(got, want) {
-			t.Errorf("期待する引数 %q が無い: %s", want, got)
+	for _, ng := range []string{"-vf", "-r ", "scale", "fps=", "pad=", "setsar", "setdar"} {
+		if strings.Contains(got, ng) {
+			t.Errorf("受信は無加工のはずが %q が混入: %s", ng, got)
 		}
 	}
-	// fps フィルタは出力指定より前（フィルタ鎖は -vf 側）に置かれること。
-	if strings.Index(got, "fps=60") > strings.Index(got, "-f v4l2") {
-		t.Errorf("fps フィルタは出力指定より前にあるべき: %s", got)
-	}
-}
-
-func TestClientArgs_FPSZeroNoRate(t *testing.T) {
-	c := config.DefaultConfigFor("linux").Client
-	c.OutputMode = config.OutputFollow // follow のみ FPS=0=ソースのまま
-	c.FPS = 0
-	c.RestoreAspect = false
-	c.TargetAspect = ""
-	got := argStr(ClientArgs(c))
-	if strings.Contains(got, "-r ") || strings.Contains(got, "fps=") {
-		t.Errorf("follow + FPS=0(ソースのまま)では fps/-r を付けない: %s", got)
-	}
-}
-
-func TestClientArgs_FixedForcesFPSEvenWhenZero(t *testing.T) {
-	// fixed では待機⇄ライブのフォーマット一致のため FPS=0 でも固定 fps(30) を必ず付ける。
-	c := config.DefaultConfigFor("linux").Client // fixed
-	c.FPS = 0
-	got := argStr(ClientArgs(c))
-	if !strings.Contains(got, "-r 30") || !strings.Contains(got, "fps=30") {
-		t.Errorf("fixed + FPS=0 では固定 fps 30 を付けるべき: %s", got)
-	}
-	// 待機映像も同一 fps・解像度であること。
-	ph := argStr(ClientPlaceholderArgs(c))
-	if !strings.Contains(ph, "s=1920x1080:r=30") {
-		t.Errorf("待機映像がライブと同一フォーマットでない: %s", ph)
-	}
-}
-
-func TestCamCanvasNormalizesDims(t *testing.T) {
-	c := config.DefaultConfigFor("linux").Client
-	c.OutputMode = config.OutputFixed
-	c.CamWidth, c.CamHeight, c.FPS = 1000, 563, 0 // 非16倍数・奇数・fps0
-	w, h, fps := camCanvas(c)
-	if w%16 != 0 {
-		t.Errorf("幅が16の倍数でない: %d", w)
-	}
-	if h%2 != 0 {
-		t.Errorf("高さが偶数でない: %d", h)
-	}
-	if fps != 30 {
-		t.Errorf("FPS=0 が固定値へ正規化されていない: %d", fps)
-	}
-	// ライブと待機が同じ正規化値を使うこと（食い違い＝再接続クラッシュの原因を排除）。
-	live := argStr(ClientArgs(c))
-	ph := argStr(ClientPlaceholderArgs(c))
-	dim := fmt.Sprintf("%dx%d", w, h)
-	if !strings.Contains(ph, "s="+dim) {
-		t.Errorf("待機映像の寸法が正規化値 %s と一致しない: %s", dim, ph)
-	}
-	if !strings.Contains(live, fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", w, h)) {
-		t.Errorf("ライブの寸法が正規化値 %s と一致しない: %s", dim, live)
-	}
-}
-
-func TestClientArgs_FixedComposesUserVF(t *testing.T) {
-	c := config.DefaultConfigFor("linux").Client // fixed
-	c.ExtraArgs = "-vf hflip"
-	got := argStr(ClientArgs(c))
-	// ユーザー -vf は捨てず固定枠の前段へ合成し、-vf は1つだけ。
-	if strings.Count(got, "-vf") != 1 {
-		t.Errorf("fixed で -vf が二重指定になっている: %s", got)
-	}
-	if !strings.Contains(got, "-vf hflip,") {
-		t.Errorf("fixed でユーザー -vf が固定枠の前段へ合成されていない: %s", got)
-	}
-	if !strings.Contains(got, "scale=1920:1080:force_original_aspect_ratio=decrease") {
-		t.Errorf("fixed の固定枠スケールが欠落: %s", got)
-	}
-}
-
-func TestClientArgs_FPSWithUserVF_RateStillForced(t *testing.T) {
-	c := config.DefaultConfigFor("linux").Client
-	c.OutputMode = config.OutputFollow // follow: ユーザー -vf があれば本機能の -vf は付けない
-	c.FPS = 60
-	c.ExtraArgs = "-vf hflip"
-	got := argStr(ClientArgs(c))
-	// ユーザー -vf 優先で本機能の fps フィルタは付けないが、-r は独立して付く。
-	if strings.Contains(got, "fps=60") {
-		t.Errorf("ユーザー -vf がある場合は fps フィルタを付けない: %s", got)
-	}
-	if !strings.Contains(got, "-r 60") {
-		t.Errorf("ユーザー -vf があっても出力 -r は固定する: %s", got)
-	}
-	if strings.Count(got, "-vf") != 1 {
-		t.Errorf("-vf が二重指定になっている: %s", got)
-	}
-}
-
-func TestClientArgs_FixedModeConstantFormat(t *testing.T) {
-	c := config.DefaultConfigFor("linux").Client // 既定 fixed / 1920x1080
-	c.FPS = 60
-	got := argStr(ClientArgs(c))
-	for _, want := range []string{
-		"scale=1920:1080:force_original_aspect_ratio=decrease",
-		"pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
-		"-r 60", "-pix_fmt yuv420p", "-f v4l2 /dev/video10",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("fixed モードに期待する引数 %q が無い: %s", want, got)
-		}
-	}
-	// 入力解像度に依存する follow 用 padToAspect は出てはならない。
-	if strings.Contains(got, "ceil(max(iw") {
-		t.Errorf("fixed モードで follow 用の比率 pad が混入: %s", got)
-	}
-}
-
-func TestClientArgs_FollowModeUnchanged(t *testing.T) {
-	c := config.DefaultConfigFor("linux").Client
-	c.OutputMode = config.OutputFollow
-	c.RestoreAspect = true
-	c.TargetAspect = "16:9"
-	got := argStr(ClientArgs(c))
-	for _, want := range []string{
-		"scale='trunc(iw*sar/2)*2':ih", "setsar=1",
-		"pad=w='ceil(max(iw,ih*16/9)/16)*16'",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("follow モードに期待する引数 %q が無い: %s", want, got)
-		}
-	}
-	// follow では固定キャンバスへの scale は出ない。
-	if strings.Contains(got, "force_original_aspect_ratio") {
-		t.Errorf("follow モードに固定スケールが混入: %s", got)
+	// 追加引数は素通しされる（入力の後・出力の前）。
+	c.ExtraArgs = "-flags2 +export_mvs"
+	if !strings.Contains(argStr(ClientArgs(c)), "-flags2 +export_mvs") {
+		t.Errorf("追加引数が反映されていない")
 	}
 }
 
 func TestClientPlaceholderArgs(t *testing.T) {
 	c := config.DefaultConfigFor("linux").Client
-	c.FPS = 60
-	got := argStr(ClientPlaceholderArgs(c))
+	got := argStr(ClientPlaceholderArgs(1152, 720, c))
 	for _, want := range []string{
-		"-f lavfi", "color=c=0x1e1e1e:s=1920x1080:r=60",
+		"-re", "-f lavfi", "color=c=0x1e1e1e:s=1152x720:r=30",
+		"drawtext=text='LANCast'", "ホストの接続を待っています",
 		"-pix_fmt yuv420p", "-f v4l2 /dev/video10",
 	} {
 		if !strings.Contains(got, want) {
 			t.Errorf("待機映像に期待する引数 %q が無い: %s", want, got)
 		}
+	}
+	// 寸法は引数で渡したホスト学習値に一致する（待機⇄ライブのフォーマット一致＝シアー防止）。
+	if !strings.Contains(got, "s=1152x720") {
+		t.Errorf("待機映像が指定寸法 1152x720 になっていない: %s", got)
+	}
+	// -re は入力(lavfi)より前に置く（入力オプションとして効かせる）。
+	if strings.Index(got, "-re") > strings.Index(got, "-f lavfi") {
+		t.Errorf("-re は入力指定より前にあるべき: %s", got)
 	}
 	// 待機映像は受信(UDP)入力を持たない。
 	if strings.Contains(got, "udp://") {
@@ -282,65 +197,38 @@ func TestPresetWidth(t *testing.T) {
 	}
 }
 
-func TestHostArgs_Anamorphic_SetsDAR(t *testing.T) {
-	c := config.DefaultConfigFor("darwin").Host
-	c.Width, c.Height = 1280, 720   // 16:9
-	c.DARNum, c.DARDen = 1920, 1200 // 実画面 16:10
-	got := argStr(HostArgs(c))
-	if !strings.Contains(got, "setdar=1920/1200") {
-		t.Errorf("アナモルフィック時に setdar が無い: %s", got)
-	}
-}
-
-func TestHostArgs_NoAnamorphicWhenAspectMatches(t *testing.T) {
+func TestHostArgs_NoSetDAR(t *testing.T) {
+	// アナモルフィックは廃止。送出は Width:Height のまま、setdar は付けない。
 	c := config.DefaultConfigFor("darwin").Host
 	c.Width, c.Height = 1280, 720
-	c.DARNum, c.DARDen = 1920, 1080 // 16:9 = 出力比と一致
 	if strings.Contains(argStr(HostArgs(c)), "setdar") {
-		t.Errorf("比率一致時に setdar を付けてはならない")
+		t.Errorf("アナモルフィック廃止後に setdar が付いている")
+	}
+	cl := config.DefaultConfigFor("linux").Host // libx264 (CPU 経路)
+	if strings.Contains(argStr(HostArgs(cl)), "setdar") {
+		t.Errorf("CPU 経路でも setdar は付けない")
 	}
 }
 
-func TestClientArgs_RestoreAndPad(t *testing.T) {
-	c := config.DefaultConfigFor("linux").Client
-	c.OutputMode = config.OutputFollow
-	c.RestoreAspect = true
-	c.TargetAspect = "16:9"
-	got := argStr(ClientArgs(c))
-	for _, want := range []string{
-		"-vf", "scale='trunc(iw*sar/2)*2':ih", "setsar=1",
-		"pad=w='ceil(max(iw,ih*16/9)/16)*16'",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("期待する引数 %q が無い: %s", want, got)
+func TestParseAspect(t *testing.T) {
+	cases := []struct {
+		in       string
+		num, den int
+		ok       bool
+	}{
+		{"16:9", 16, 9, true},
+		{"16:10", 16, 10, true},
+		{"21:9", 21, 9, true},
+		{"9:21", 9, 21, true},
+		{"", 0, 0, false},
+		{"abc", 0, 0, false},
+		{"16:0", 0, 0, false},
+	}
+	for _, c := range cases {
+		n, d, ok := ParseAspect(c.in)
+		if ok != c.ok || (ok && (n != c.num || d != c.den)) {
+			t.Errorf("ParseAspect(%q)=(%d,%d,%v) want (%d,%d,%v)", c.in, n, d, ok, c.num, c.den, c.ok)
 		}
-	}
-}
-
-func TestClientArgs_UserVFTakesPrecedence(t *testing.T) {
-	c := config.DefaultConfigFor("linux").Client
-	c.OutputMode = config.OutputFollow
-	c.RestoreAspect = true
-	c.TargetAspect = "16:9"
-	c.ExtraArgs = "-vf hflip"
-	got := argStr(ClientArgs(c))
-	// ユーザーの -vf を優先し、本機能の復元/pad フィルタは付けない（二重 -vf 回避）。
-	if strings.Contains(got, "setsar=1") || strings.Contains(got, "pad=w=") {
-		t.Errorf("追加引数に -vf がある場合、本機能のフィルタを付けてはならない: %s", got)
-	}
-	if strings.Count(got, "-vf") != 1 {
-		t.Errorf("-vf が二重指定になっている: %s", got)
-	}
-}
-
-func TestClientArgs_NoVFWhenDisabled(t *testing.T) {
-	c := config.DefaultConfigFor("linux").Client
-	c.OutputMode = config.OutputFollow
-	c.RestoreAspect = false
-	c.TargetAspect = ""
-	c.FPS = 0 // fps 正規化も無効なら無加工
-	if strings.Contains(argStr(ClientArgs(c)), "-vf") {
-		t.Errorf("復元も目標比率も fps 正規化も無効なら -vf は付けない（従来挙動）")
 	}
 }
 

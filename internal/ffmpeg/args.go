@@ -84,14 +84,24 @@ func encoderExtra(enc string) []string {
 	}
 }
 
+// usesVideotoolbox はエンコーダが Apple VideoToolbox（HW アクセラレータ）かを返す。
+func usesVideotoolbox(enc string) bool {
+	return enc == "hevc_videotoolbox" || enc == "h264_videotoolbox"
+}
+
 // hostInput はキャプチャバックエンド別の入力部分（-f … -i …）を args に付ける。
-// HostArgs と HostPreviewArgs で共有する。
-func hostInput(args []string, c config.HostConfig) []string {
+// HostArgs と HostPreviewArgs で共有する。avfPixFmt が非空のときは avfoundation 入力に
+// -pixel_format を指定し、キャプチャ側へ直接その形式を出させる（uyvy422→nv12 等の
+// CPU 変換を省くため）。
+func hostInput(args []string, c config.HostConfig, avfPixFmt string) []string {
 	switch c.Backend {
 	case "avfoundation":
 		// 注: mac の avfoundation スクリーンキャプチャに -framerate を付けると
 		// "Configuration of video device failed" を誘発するため付けない。
 		args = append(args, "-f", "avfoundation")
+		if avfPixFmt != "" {
+			args = append(args, "-pixel_format", avfPixFmt)
+		}
 		if c.CaptureCursor {
 			args = append(args, "-capture_cursor", "1")
 		}
@@ -114,15 +124,23 @@ func hostInput(args []string, c config.HostConfig) []string {
 func HostArgs(c config.HostConfig) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning", "-stats"}
 
-	// 入力（キャプチャバックエンド別）。
-	args = hostInput(args, c)
+	// avfoundation×VideoToolbox では、スケール/形式変換を GPU へ逃がす。
+	// 既定の CPU 経路（swscale で scale+pixfmt 変換）が Retina フル解像度×高 FPS で
+	// CPU を 100% 超まで食うため、avfoundation に nv12 を直接出させて uyvy422→nv12 の
+	// CPU 変換を排除し、hwupload→scale_vt で GPU 上でスケールする。
+	gpu := c.Backend == "avfoundation" && usesVideotoolbox(c.Encoder)
 
-	// 映像フィルタ（解像度・FPS 正規化）。DAR が指定され、かつ Width:Height と
-	// 異なる場合はアナモルフィック（圧縮映像＋表示比メタデータ）として送る。
-	// setdar が H.264/HEVC の SAR に反映され、受信側が実比率を復元できる。
-	vf := fmt.Sprintf("scale=%d:%d,fps=%d", c.Width, c.Height, c.FPS)
-	if dar := darFilter(c); dar != "" {
-		vf += "," + dar
+	// 映像フィルタ（解像度・FPS 正規化のみ）。送出は Width:Height をそのまま使う
+	// WYSIWYG。アスペクトはユーザーが Width×Height で決め、受信側は無加工で表示する。
+	var vf string
+	if gpu {
+		args = append(args, "-init_hw_device", "videotoolbox")
+		args = hostInput(args, c, "nv12")
+		// fps を hwupload の前に置き、間引くフレームをアップロードしない。
+		vf = fmt.Sprintf("fps=%d,hwupload,scale_vt=%d:%d", c.FPS, c.Width, c.Height)
+	} else {
+		args = hostInput(args, c, "")
+		vf = fmt.Sprintf("scale=%d:%d,fps=%d", c.Width, c.Height, c.FPS)
 	}
 	args = append(args, "-vf", vf)
 
@@ -138,18 +156,6 @@ func HostArgs(c config.HostConfig) []string {
 	// 巨大データグラムによる断片化・欠落を避ける定石値。
 	args = append(args, "-f", "mpegts", fmt.Sprintf("udp://%s:%d?pkt_size=1316", udpHost(c.DestIP), c.DestPort))
 	return args
-}
-
-// darFilter は送出フレームに付ける表示比メタデータ（setdar）を返す。
-// DAR 未指定、または DAR が Width:Height と一致する（＝歪み無し）なら空。
-func darFilter(c config.HostConfig) string {
-	if c.DARNum <= 0 || c.DARDen <= 0 {
-		return ""
-	}
-	if c.DARNum*c.Height == c.DARDen*c.Width {
-		return "" // 既に正方ピクセル相当。メタデータ不要。
-	}
-	return fmt.Sprintf("setdar=%d/%d", c.DARNum, c.DARDen)
 }
 
 // Align16 は v4l2 のストライド・パディング由来のシアー（斜めズレ）を避けるため、
@@ -170,7 +176,16 @@ func PresetWidth(height, aw, ah int) int {
 	return Align16(height * aw / ah)
 }
 
-// ClientArgs は受信側 ffmpeg の引数列を生成する（v4l2 仮想カメラへ書き込み）。
+// clientPixFmt は仮想カメラへ書き込むピクセル形式。H.264/HEVC のデコード結果は
+// 実質 yuv420p なので、これを待機・ライブ双方で固定して v4l2 フォーマットを一定にする。
+const clientPixFmt = "yuv420p"
+
+// placeholderFPS は待機映像の提示フレームレート（実時間ペース）。
+const placeholderFPS = 30
+
+// ClientArgs は受信側 ffmpeg の引数列を生成する。
+// 受信ストリームを無加工で v4l2 仮想カメラへ流す（スケール・FPS 正規化・アスペクト処理は
+// 一切しない）。解像度・FPS・アスペクトはホスト送出のまま。フォーマット確定はホストの責務。
 func ClientArgs(c config.ClientConfig) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning", "-stats"}
 	if c.LowDelay {
@@ -179,36 +194,8 @@ func ClientArgs(c config.ClientConfig) []string {
 	args = append(args, "-probesize", "500000", "-analyzeduration", "0")
 	url := fmt.Sprintf("udp://@:%d?fifo_size=%d&overrun_nonfatal=1", c.ListenPort, c.FifoSize)
 	args = append(args, "-i", url)
-
-	extra := splitArgs(c.ExtraArgs)
-
-	if c.OutputMode == config.OutputFixed {
-		// fixed: 固定枠フィルタは必須（外れると待機⇄ライブで寸法が食い違い再接続で落ちる）。
-		// ユーザーが追加引数で -vf を指定していたら、その鎖を固定枠の前段へ合成して
-		// 1本の -vf にまとめる（-vf 二重指定は ffmpeg がエラーになるため）。
-		userVF, rest := extractVF(extra)
-		args = append(args, rest...)
-		chain := fixedVF(c)
-		if userVF != "" {
-			chain = userVF + "," + chain
-		}
-		args = append(args, "-vf", chain)
-		// 出力フレームレートも固定（待機映像と同一 fps）。
-		_, _, fps := camCanvas(c)
-		args = append(args, "-r", strconv.Itoa(fps))
-	} else {
-		args = append(args, extra...)
-		// follow: ユーザーが独自の -vf を指定していれば二重指定回避で本機能の -vf は付けない。
-		if vf := followVF(c); vf != "" && !hasVideoFilter(extra) {
-			args = append(args, "-vf", vf)
-		}
-		// 仮想カメラへ N fps の CFR で提示する。0 は送信ストリーム任せ（従来挙動）。
-		if c.FPS > 0 {
-			args = append(args, "-r", strconv.Itoa(c.FPS))
-		}
-	}
-
-	args = append(args, "-pix_fmt", c.PixFmt, "-f", "v4l2", c.OutputDevice)
+	args = append(args, splitArgs(c.ExtraArgs)...)
+	args = append(args, "-pix_fmt", clientPixFmt, "-f", "v4l2", c.OutputDevice)
 	return args
 }
 
@@ -217,119 +204,36 @@ const PlaceholderColor = "0x1e1e1e"
 
 // ClientPlaceholderArgs は「待機中」映像を仮想カメラへ流し続ける引数列を生成する。
 // 受信ストリームが無い間（開始直後・ホスト停止中）も仮想カメラを生かし続け、Discord が
-// カメラを失わないようにする。寸法・FPS・ピクセル形式を camCanvas でライブ(fixed)と
-// 同一値に揃えることで、待機⇄ライブを切り替えてもフォーマットが変わらずクラッシュを避ける。
-func ClientPlaceholderArgs(c config.ClientConfig) []string {
-	w, h, fps := camCanvas(c)
+// カメラを失わないようにする。w×h は直近に受信したホスト送出の解像度（supervisor が学習）で、
+// ライブと同じ寸法・ピクセル形式にすることで待機⇄ライブのフォーマット食い違い（=斜めズレ）を防ぐ。
+func ClientPlaceholderArgs(w, h int, c config.ClientConfig) []string {
 	args := []string{"-hide_banner", "-loglevel", "warning", "-stats"}
-	args = append(args, "-f", "lavfi", "-i",
-		fmt.Sprintf("color=c=%s:s=%dx%d:r=%d", PlaceholderColor, w, h, fps))
-	args = append(args, "-pix_fmt", c.PixFmt, "-f", "v4l2", c.OutputDevice)
+	// -re で実時間ペースに制限する。これが無いと v4l2 出力は即時受理し、ffmpeg が
+	// 待機フレームを全力生成して fps が数千まで暴走、待機中ずっと CPU を1コア焼き続ける。
+	args = append(args, "-re", "-f", "lavfi", "-i",
+		fmt.Sprintf("color=c=%s:s=%dx%d:r=%d", PlaceholderColor, w, h, placeholderFPS))
+	// プレースホルダだと一目で分かるよう中央へテキストを重ねる。
+	args = append(args, "-vf", placeholderVF(h))
+	args = append(args, "-pix_fmt", clientPixFmt, "-f", "v4l2", c.OutputDevice)
 	return args
 }
 
-// camCanvas は fixed モードで仮想カメラへ提示する正規化済みフォーマット（幅・高さ・fps）を返す。
-// 待機(placeholder)とライブ(fixedVF/ClientArgs)が必ず同一値を使うよう一箇所に集約する。
-// これが「全 writer が同一フォーマットで書く」=再接続で落ちない、の不変条件の根拠。
-//   - 幅は v4l2 のストライド由来シアー回避のため 16 の倍数へ（Align16）。
-//   - 高さは yuv420p の偶数制約のため偶数へ。
-//   - FPS は提示レートを確定させるため 1 以上へ（0=ソースのままは fixed では使わない）。
-func camCanvas(c config.ClientConfig) (w, h, fps int) {
-	w = Align16(c.CamWidth)
-	h = c.CamHeight / 2 * 2
-	if h < 2 {
-		h = 2
-	}
-	fps = c.FPS
-	if fps <= 0 {
-		fps = 30
-	}
-	return w, h, fps
-}
-
-// extractVF は引数列から先頭の -vf/-filter:v の値を取り出し、それ以外の引数を rest に残す。
-// fixed モードでユーザー指定フィルタを固定枠フィルタの前段へ合成するために使う。
-func extractVF(args []string) (vf string, rest []string) {
-	for i := 0; i < len(args); i++ {
-		if (args[i] == "-vf" || args[i] == "-filter:v") && i+1 < len(args) && vf == "" {
-			vf = args[i+1]
-			i++ // 値もスキップ
-			continue
-		}
-		rest = append(rest, args[i])
-	}
-	return vf, rest
-}
-
-// HasVideoFilter は追加引数文字列に映像フィルタ指定が含まれるかを返す（UI 警告用）。
-func HasVideoFilter(extraArgs string) bool {
-	return hasVideoFilter(splitArgs(extraArgs))
-}
-
-// hasVideoFilter は引数列に映像フィルタ指定（-vf / -filter:v / -filter_complex）が
-// 含まれるかを返す。
-func hasVideoFilter(args []string) bool {
-	for _, a := range args {
-		if a == "-vf" || a == "-filter:v" || a == "-filter_complex" {
-			return true
-		}
-	}
-	return false
-}
-
-// fixedVF は受信映像を camCanvas の固定フォーマット（幅16整列・高さ偶数・固定fps）へ
-// スケール/パディングする。入力解像度が何であれ出力は固定なので、ホスト側が解像度を
-// 変えても・再接続しても仮想カメラのフォーマットは変わらず、Discord(Chromium) が落ちない。
-func fixedVF(c config.ClientConfig) string {
-	w, h, fps := camCanvas(c)
-	var f []string
-	if c.RestoreAspect {
-		// 受信 SAR を反映して実比率の幅へ伸長してから固定枠へ収める。
-		f = append(f, "scale='trunc(iw*sar/2)*2':ih", "setsar=1")
-	}
-	// アスペクト比を保ったまま固定枠へ収め、余白を黒で中央パディングする。
-	f = append(f,
-		fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", w, h),
-		fmt.Sprintf("pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black", w, h),
-		"setsar=1",
-		"fps="+strconv.Itoa(fps),
-	)
-	return strings.Join(f, ",")
-}
-
-// followVF はホスト解像度に追従する従来のフィルタ鎖（復元＋目標比率パディング）。
-func followVF(c config.ClientConfig) string {
-	var f []string
-	if c.FPS > 0 {
-		// フレームを N fps へ正規化（重複/間引き）し、CFR で仮想カメラへ渡す。
-		// -r だけでなくフィルタ側でも整えることで、可変フレームレート入力でも
-		// 仮想カメラへの到達タイミングが一定になり、消費側の負荷予測が安定する。
-		f = append(f, "fps="+strconv.Itoa(c.FPS))
-	}
-	if c.RestoreAspect {
-		// 受信 SAR を反映して実比率の幅へ伸長し、以後は正方ピクセルとして扱う。
-		f = append(f, "scale='trunc(iw*sar/2)*2':ih", "setsar=1")
-	}
-	if num, den, ok := parseAspect(c.TargetAspect); ok {
-		// 指定比率の枠へ収まるよう端を黒で埋める（切り取らない）。
-		// 幅は 16 の倍数・高さは偶数へ切り上げ、v4l2 のシアーも同時に回避。
-		f = append(f, padToAspect(num, den))
-	} else if c.RestoreAspect {
-		// 目標比率を使わない場合でも、復元後の幅を 16 整列してシアーを防ぐ。
-		f = append(f, "pad='ceil(iw/16)*16':'ceil(ih/2)*2':0:0:color=black")
-	}
-	return strings.Join(f, ",")
-}
-
-// padToAspect は num:den 比へ「収める」pad フィルタを返す（中央寄せ・黒帯）。
-func padToAspect(num, den int) string {
+// placeholderVF は待機映像に重ねる中央テキスト（2行）を drawtext で生成する。
+// フォントは fontconfig 既定に任せる（Linux では Noto Sans CJK 等が選ばれ日本語も描画できる）。
+// テキストには drawtext のパースを乱す : , ' \ % を含めない。
+func placeholderVF(h int) string {
+	title := h / 10
+	sub := h / 22
+	gap := h / 12
 	return fmt.Sprintf(
-		"pad=w='ceil(max(iw,ih*%[1]d/%[2]d)/16)*16':h='ceil(max(ih,iw*%[2]d/%[1]d)/2)*2':x='(ow-iw)/2':y='(oh-ih)/2':color=black",
-		num, den)
+		"drawtext=text='LANCast':fontcolor=white:fontsize=%d:x=(w-text_w)/2:y=(h-text_h)/2-%d,"+
+			"drawtext=text='ホストの接続を待っています…':fontcolor=0x9aa0a6:fontsize=%d:x=(w-text_w)/2:y=(h-text_h)/2+%d",
+		title, gap, sub, gap)
 }
 
-// parseAspect は "16:9" のような比率を num,den へ分解する。"" は ok=false。
-func parseAspect(s string) (num, den int, ok bool) {
+// ParseAspect は "16:9" のような比率を num,den へ分解する。"" は ok=false。
+// プリセットの横ドット数算出（PresetWidth の基準比）に使う。
+func ParseAspect(s string) (num, den int, ok bool) {
 	i := strings.IndexByte(s, ':')
 	if i <= 0 {
 		return 0, 0, false
@@ -361,7 +265,7 @@ func mjpegOutput(args []string, url string) []string {
 // 本配信を巻き込まずにオン/オフできるよう、あえてプロセスを分離している。
 func HostPreviewArgs(c config.HostConfig, url string) []string {
 	args := []string{"-hide_banner", "-loglevel", "error"}
-	args = hostInput(args, c)
+	args = hostInput(args, c, "")
 	return mjpegOutput(args, url)
 }
 

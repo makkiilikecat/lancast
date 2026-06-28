@@ -25,9 +25,9 @@ func TestDefaultConfigFor(t *testing.T) {
 	if mac.Client.OutputDevice != "/dev/video10" || mac.Client.ListenPort != 5004 {
 		t.Errorf("client 既定値が不正: %+v", mac.Client)
 	}
-	// 仮想カメラの既定提示 fps はホスト既定 fps に一致する（不定 framerate を避ける）。
-	if mac.Client.FPS != mac.Host.FPS {
-		t.Errorf("client 既定 FPS=%d は host 既定 FPS=%d に一致すべき", mac.Client.FPS, mac.Host.FPS)
+	// 目標比率の既定は "" (画面そのまま)。
+	if mac.Host.TargetAspect != "" {
+		t.Errorf("host 既定 TargetAspect は \"\" であるべき: %q", mac.Host.TargetAspect)
 	}
 }
 
@@ -97,38 +97,40 @@ func TestClientValidate(t *testing.T) {
 		t.Error("ポート0 が検出されない")
 	}
 	bad = ok
-	bad.FPS = -1
+	bad.OutputDevice = ""
 	if bad.Validate() == "" {
-		t.Error("負の FPS が検出されない")
-	}
-	good := ok
-	good.FPS = 0 // 0=ソースのまま は許容
-	if good.Validate() != "" {
-		t.Error("FPS=0(ソースのまま) は許容されるべき")
-	}
-	bad = ok
-	bad.OutputMode = "weird"
-	if bad.Validate() == "" {
-		t.Error("不正な出力モードが検出されない")
-	}
-	bad = ok
-	bad.OutputMode = OutputFixed
-	bad.CamWidth = 0
-	if bad.Validate() == "" {
-		t.Error("固定モードでカメラ幅0 が検出されない")
-	}
-	good = ok
-	good.OutputMode = OutputFollow
-	good.CamWidth, good.CamHeight = 0, 0 // follow ではカメラ解像度不要
-	if good.Validate() != "" {
-		t.Error("follow モードはカメラ解像度0でも許容されるべき")
+		t.Error("空の出力デバイスが検出されない")
 	}
 }
 
-func TestDefaultClientOutputMode(t *testing.T) {
+func TestHostTargetAspectValidate(t *testing.T) {
+	ok := DefaultConfigFor("darwin").Host
+	for _, a := range TargetAspects {
+		h := ok
+		h.TargetAspect = a
+		if h.Validate() != "" {
+			t.Errorf("有効な目標比率 %q が不正と判定された", a)
+		}
+	}
+	bad := ok
+	bad.TargetAspect = "weird"
+	if bad.Validate() == "" {
+		t.Error("不正な目標比率が検出されない")
+	}
+}
+
+func TestTargetAspectsHasNewRatios(t *testing.T) {
+	for _, want := range []string{"16:10", "21:9", "9:21"} {
+		if !validTargetAspect(want) {
+			t.Errorf("目標比率 %q が候補に無い", want)
+		}
+	}
+}
+
+func TestDefaultClientCamSize(t *testing.T) {
 	c := DefaultConfigFor("linux").Client
-	if c.OutputMode != OutputFixed || c.CamWidth != 1920 || c.CamHeight != 1080 {
-		t.Errorf("既定の Client 出力モードが不正: %+v", c)
+	if c.CamWidth != 1280 || c.CamHeight != 720 {
+		t.Errorf("待機映像の既定寸法が不正: %dx%d", c.CamWidth, c.CamHeight)
 	}
 }
 

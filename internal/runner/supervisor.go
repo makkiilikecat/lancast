@@ -3,6 +3,8 @@ package runner
 import (
 	"fmt"
 	"net"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -31,12 +33,21 @@ type ClientSupervisor struct {
 	lastProg time.Time
 	state    string
 
+	// 受信は無加工のため、待機(プレースホルダ)映像の寸法はライブ受信の解像度に合わせる
+	// 必要がある（待機⇄ライブで仮想カメラのフォーマットを一致させ、Discord 側の斜めズレを防ぐ）。
+	bin           string
+	liveArgs      []string
+	placeholderFn func(w, h int) []string // 待機映像引数を寸法から生成する
+	camW, camH    int                     // 直近に受信したホスト送出の解像度（待機映像に使う）
+
 	// OnUpdate はログ/状態更新時に呼ばれる（UI 再描画トリガ用）。Start 前に設定する。
 	OnUpdate func()
 	// OnLine は新しいログ行ごとに呼ばれる（ヘッドレス時の標準出力用）。Start 前に設定する。
 	OnLine func(string)
 	// OnState は状態遷移（待機/ライブ/停止）通知（任意・UI/ログ表示用）。Start 前に設定する。
 	OnState func(string)
+	// OnFormat は受信解像度を学習して変化したとき呼ばれる（設定への永続化用・任意）。Start 前に設定する。
+	OnFormat func(w, h int)
 }
 
 const (
@@ -75,9 +86,10 @@ func (s *ClientSupervisor) State() string {
 	return s.state
 }
 
-// Start は供給制御を開始する。live は受信→v4l2、placeholder は待機映像→v4l2 の引数列。
-// port は UDP 受信ポート（待機中の到着検出に使う）。既に稼働中なら何もしない。
-func (s *ClientSupervisor) Start(bin string, live, placeholder []string, port int) error {
+// Start は供給制御を開始する。live は受信→v4l2 の引数列、placeholderFn は待機映像→v4l2 の
+// 引数列を寸法(w,h)から生成する関数。camW/camH は待機映像の初期寸法（直近のホスト解像度＝
+// 設定の学習値。受信が始まれば実寸へ更新される）。port は UDP 受信ポート。既に稼働中なら何もしない。
+func (s *ClientSupervisor) Start(bin string, live []string, placeholderFn func(w, h int) []string, port, camW, camH int) error {
 	s.mu.Lock()
 	if s.active {
 		s.mu.Unlock()
@@ -86,20 +98,84 @@ func (s *ClientSupervisor) Start(bin string, live, placeholder []string, port in
 	s.active = true
 	s.stopCh = make(chan struct{})
 	s.doneCh = make(chan struct{})
+	s.bin = bin
+	s.liveArgs = live
+	s.placeholderFn = placeholderFn
+	if camW > 0 && camH > 0 {
+		s.camW, s.camH = camW, camH
+	}
+	if s.camW <= 0 || s.camH <= 0 {
+		s.camW, s.camH = 1280, 720 // 学習前の安全既定
+	}
 	s.mu.Unlock()
 
 	s.r.OnUpdate = s.OnUpdate
-	// フレーム進捗(frame=)を監視しつつ、ユーザーの OnLine へ転送する。
+	// フレーム進捗(frame=)を監視しつつ、ライブ受信の解像度を学習し、ユーザーの OnLine へ転送する。
 	s.r.OnLine = func(line string) {
 		if isProgressLine(line) {
 			s.touch()
 		}
+		s.learnFormat(line)
 		if s.OnLine != nil {
 			s.OnLine(line)
 		}
 	}
-	go s.loop(bin, live, placeholder, port)
+	go s.loop(port)
 	return nil
+}
+
+// currentPlaceholder は学習済み寸法で待機映像の引数列を生成する。
+func (s *ClientSupervisor) currentPlaceholder() []string {
+	s.mu.Lock()
+	w, h, fn := s.camW, s.camH, s.placeholderFn
+	s.mu.Unlock()
+	return fn(w, h)
+}
+
+// learnFormat はライブ受信ストリームの解像度を学習し、待機映像をそれに合わせる
+// （待機⇄ライブのフォーマット一致＝斜めズレ防止）。寸法が変わったら OnFormat で永続化を促す。
+// 待機映像(lavfi)のストリーム行を誤学習しないよう、ライブ状態のときだけ拾う。
+func (s *ClientSupervisor) learnFormat(line string) {
+	s.mu.Lock()
+	live := s.state == "ライブ"
+	s.mu.Unlock()
+	if !live {
+		return
+	}
+	w, h, ok := parseVideoDims(line)
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	changed := w != s.camW || h != s.camH
+	if changed {
+		s.camW, s.camH = w, h
+	}
+	cb := s.OnFormat
+	s.mu.Unlock()
+	if changed && cb != nil {
+		cb(w, h)
+	}
+}
+
+// videoDimsRe は ffmpeg ストリーム情報行中の解像度 "1280x720" を拾う。
+var videoDimsRe = regexp.MustCompile(`(\d{2,5})x(\d{2,5})`)
+
+// parseVideoDims は ffmpeg のストリーム情報行 "... Video: ... 1280x720 ..." から解像度を取り出す。
+func parseVideoDims(line string) (w, h int, ok bool) {
+	if !strings.Contains(line, "Video:") {
+		return 0, 0, false
+	}
+	m := videoDimsRe.FindStringSubmatch(line)
+	if m == nil {
+		return 0, 0, false
+	}
+	w, _ = strconv.Atoi(m[1])
+	h, _ = strconv.Atoi(m[2])
+	if w < 16 || h < 16 {
+		return 0, 0, false
+	}
+	return w, h, true
 }
 
 // Stop は供給制御を停止する（待機/ライブのどちらでも即座に終わる）。
@@ -127,7 +203,7 @@ func (s *ClientSupervisor) Stop() {
 }
 
 // loop は待機⇄ライブの状態機械を回す。stop されるまで継続する。
-func (s *ClientSupervisor) loop(bin string, live, placeholder []string, port int) {
+func (s *ClientSupervisor) loop(port int) {
 	defer close(s.doneCh)
 	first := true
 	for {
@@ -143,15 +219,16 @@ func (s *ClientSupervisor) loop(bin string, live, placeholder []string, port int
 		first = false
 
 		// --- 待機: プレースホルダ映像を流しつつ UDP を監視 ---
+		// 待機映像の寸法は学習済みのホスト解像度（currentPlaceholder）に合わせる。
 		s.setState("待機")
-		if err := s.r.Start(bin, placeholder); err != nil {
+		if err := s.r.Start(s.bin, s.currentPlaceholder()); err != nil {
 			// 出力デバイス使用中など。状態へ出して間隔を置いて再試行する。
 			s.setState("待機(デバイス使用中?)")
 			continue
 		}
 		got := s.probeUDP(port) // パケット到着か stop までブロック
 		// 待機を止めてからライブへ切り替える。この間 writer が一瞬不在になるが、消費側
-		// (Discord) は直前フレームを保持し、fixed では同一フォーマットで復帰するため落ちない。
+		// (Discord) は直前フレームを保持し、同一フォーマットで復帰するため落ちない。
 		s.stopFeed()
 		if !got {
 			break // stop された
@@ -162,7 +239,7 @@ func (s *ClientSupervisor) loop(bin string, live, placeholder []string, port int
 		// 明示リセットし、待機由来の進捗で stall 判定が鈍らないようにする。
 		s.setState("ライブ")
 		s.touch()
-		if err := s.r.Start(bin, live); err != nil {
+		if err := s.r.Start(s.bin, s.liveArgs); err != nil {
 			continue
 		}
 		s.watchLive() // 終了/停滞/stop まで監視

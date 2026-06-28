@@ -22,56 +22,30 @@ type HostConfig struct {
 	DestPort      int    `json:"dest_port"`
 	ExtraArgs     string `json:"extra_args"` // 追加 ffmpeg 引数（空白区切り）
 
-	// 送出フレームに埋め込む表示比（実画面比）。Width:Height と異なる場合、
-	// アナモルフィック（横方向に圧縮した映像＋表示比メタデータ）として送る。
-	// 0/0 は「自動」= Width:Height をそのまま使い、アナモルフィックにしない。
-	DARNum int `json:"dar_num"`
-	DARDen int `json:"dar_den"`
+	// TargetAspect はプリセット（縦解像度 → 横ドット数）の算出に使う基準比。
+	// 例 "16:9" "16:10"。"" は検出した実画面比を使う。送出自体は Width:Height を
+	// そのまま使う（黒帯やアナモルフィックはしない＝WYSIWYG）。
+	TargetAspect string `json:"target_aspect"`
 }
 
 // ClientConfig は受信側（ネットワーク受信 → 仮想カメラ書き込み）の設定。
+//
+// 受信は無加工。ホストが確定した映像（解像度・FPS・アスペクト・ピクセル形式）を
+// そのまま v4l2 仮想カメラへ流す。スケール・黒帯・FPS 正規化・アスペクト復元は一切しない。
 type ClientConfig struct {
 	ListenPort   int    `json:"listen_port"`
 	OutputDevice string `json:"output_device"` // 例: /dev/video10
-	PixFmt       string `json:"pix_fmt"`       // 例: yuv420p
 	FifoSize     int    `json:"fifo_size"`     // UDP 受信バッファ
 	LowDelay     bool   `json:"low_delay"`     // nobuffer + low_delay
 	ExtraArgs    string `json:"extra_args"`
 
-	// FPS は仮想カメラへ提示する固定フレームレート。送信ストリームを N fps の
-	// CFR（固定フレームレート）に正規化してから v4l2loopback へ流すことで、
-	// 仮想カメラが安定した framerate を提示し、Discord/Chromium が高解像度・高 fps
-	// （例: 1080p 60fps GoLive）でカメラを開いてもタイミング計算が破綻せずクラッシュを避ける。
-	// ホストの FPS に合わせるのが基本（ホスト 60 なら 60 で真の 60fps を出せる）。
-	// 0 は「ソースのまま（無加工 = 従来挙動）」で、フレームレートは送信ストリーム任せ。
-	FPS int `json:"fps"`
-
-	// RestoreAspect は受信ストリームの SAR（送信側が埋めた実画面比）を読み、
-	// 正方ピクセルの実比率へ伸長し直してから仮想カメラへ流す。
-	RestoreAspect bool `json:"restore_aspect"`
-	// TargetAspect は仮想カメラへ出す前に、指定比率の枠へ収まるよう端を黒で
-	// 埋める（レターボックス/ピラーボックス）。"" は無加工。例: "16:9" "9:16"。
-	// OutputMode="fixed" のときは CamWidth/CamHeight が枠を決めるため無視される。
-	TargetAspect string `json:"target_aspect"`
-
-	// OutputMode は仮想カメラへ出す解像度の決め方。
-	//   "fixed":  常に CamWidth×CamHeight の一定フォーマットへスケール/パディングして出す。
-	//             ホスト解像度が変わっても仮想カメラのフォーマットは不変なので、再接続・
-	//             解像度変更で Discord(Chromium) が落ちない（推奨）。
-	//   "follow": ホストの送出解像度にそのまま追従する。フォーマットがホストに合うが、
-	//             解像度が変わるたびに仮想カメラを作り直す必要があり、Discord が
-	//             カメラを開き直す（クラッシュ/再選択が起きうる）。
-	OutputMode string `json:"output_mode"`
-	// CamWidth/CamHeight は OutputMode="fixed" で仮想カメラへ提示する固定解像度。
+	// CamWidth/CamHeight は待機(プレースホルダ)映像の解像度。ユーザー設定ではなく、
+	// 直近に受信したホスト送出の解像度を学習して保持する。待機⇄ライブで仮想カメラの
+	// フォーマット（特に幅＝ストライド）を一致させ、Discord 側の斜めズレ（シアー）を
+	// 防ぐためにある。既定は 1280x720 で、初回受信前のみ既定値が使われる。
 	CamWidth  int `json:"cam_width"`
 	CamHeight int `json:"cam_height"`
 }
-
-// 出力モードの定数。
-const (
-	OutputFixed  = "fixed"
-	OutputFollow = "follow"
-)
 
 // Config はアプリ全体の設定。
 type Config struct {
@@ -115,19 +89,13 @@ func DefaultConfigFor(goos string) Config {
 		host.Encoder = "libx264"
 	}
 	client := ClientConfig{
-		ListenPort:    5004,
-		OutputDevice:  "/dev/video10",
-		PixFmt:        "yuv420p",
-		FifoSize:      1000000,
-		LowDelay:      true,
-		RestoreAspect: true,
-		// 既定はホスト既定 FPS に合わせ、仮想カメラへ固定 fps で提示する
-		// （無指定の不定 framerate による Discord クラッシュを既定で避ける）。
-		FPS: host.FPS,
-		// 既定は固定フォーマット出力（再接続・解像度変更に強い）。
-		OutputMode: OutputFixed,
-		CamWidth:   1920,
-		CamHeight:  1080,
+		ListenPort:   5004,
+		OutputDevice: "/dev/video10",
+		FifoSize:     1000000,
+		LowDelay:     true,
+		// 待機映像の既定解像度。初回受信でホスト送出の実寸へ学習・更新される。
+		CamWidth:  1280,
+		CamHeight: 720,
 	}
 	return Config{Host: host, Client: client}
 }
@@ -150,13 +118,15 @@ func (h HostConfig) Validate() string {
 		return "キャプチャ入力を指定してください"
 	case h.Encoder == "":
 		return "エンコーダを選択してください"
+	case !validTargetAspect(h.TargetAspect):
+		return "目標比率の指定が不正です"
 	}
 	return ""
 }
 
-// TargetAspects は TargetAspect に指定できる値（"" = 無加工＝先頭）。
+// TargetAspects は TargetAspect に指定できる値（"" = 画面そのまま＝先頭）。
 // 横長に続けて縦長を並べる。UI のセレクタ順にも使う。
-var TargetAspects = []string{"", "16:9", "3:2", "4:3", "5:3", "9:16", "2:3", "3:4", "3:5"}
+var TargetAspects = []string{"", "16:9", "16:10", "21:9", "3:2", "4:3", "5:3", "9:16", "9:21", "2:3", "3:4", "3:5"}
 
 func validTargetAspect(s string) bool {
 	for _, a := range TargetAspects {
@@ -176,16 +146,6 @@ func (c ClientConfig) Validate() string {
 		return "バッファ(fifo_size)を 1 以上で指定してください"
 	case c.OutputDevice == "":
 		return "出力デバイスを入力してください"
-	case c.PixFmt == "":
-		return "ピクセル形式を入力してください"
-	case c.FPS < 0:
-		return "FPS は 0(ソースのまま) 以上で指定してください"
-	case c.OutputMode != OutputFixed && c.OutputMode != OutputFollow:
-		return "出力モードは fixed か follow を指定してください"
-	case c.OutputMode == OutputFixed && (c.CamWidth <= 0 || c.CamHeight <= 0):
-		return "固定モードのカメラ解像度(幅・高さ)を 1 以上で指定してください"
-	case !validTargetAspect(c.TargetAspect):
-		return "目標比率の指定が不正です"
 	}
 	return ""
 }

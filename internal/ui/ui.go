@@ -59,6 +59,8 @@ type App struct {
 	hEncBtn                                widget.Clickable
 	hEncoders                              []string
 	hEncIdx                                int
+	hTargetBtn                             widget.Clickable // 目標比率（プリセット横算出の基準）
+	hTargetIdx                             int
 	screenW, screenH                       int // 検出した実画面の解像度（0=未検出）
 	presets                                []presetBtn
 	hStart, hStop, hClear, hRecheck        widget.Clickable
@@ -67,20 +69,15 @@ type App struct {
 	hPreviewOn                             widget.Bool
 	hLog                                   widget.List
 
-	// Client 入力。
-	cPort, cFifo, cFPS, cDevice, cPixFmt, cExtra widget.Editor
-	cCamW, cCamH                                 widget.Editor
-	cLowDelay                                    widget.Bool
-	cStart, cStop, cClear, cRecheck              widget.Clickable
-	cModeBtn                                     widget.Clickable
-	cOutputMode                                  string // config.OutputFixed / OutputFollow
-	cPrev                                        widget.Editor
-	cPrevCache                                   string
-	cPreviewOn                                   widget.Bool
-	cRestore                                     widget.Bool
-	cTargetBtn                                   widget.Clickable
-	cTargetIdx                                   int
-	cLog                                         widget.List
+	// Client 入力。受信は無加工なので設定は最小限。
+	cPort, cFifo, cDevice, cExtra   widget.Editor
+	cLowDelay                       widget.Bool
+	cStart, cStop, cClear, cRecheck widget.Clickable
+	cCamWidth, cCamHeight           int // 待機映像の寸法（受信から学習・永続化）。UI では編集しない。
+	cPrev                           widget.Editor
+	cPrevCache                      string
+	cPreviewOn                      widget.Bool
+	cLog                            widget.List
 
 	setupRecheck           widget.Clickable
 	hGotoSetup, cGotoSetup widget.Clickable
@@ -140,11 +137,11 @@ func NewApp() *App {
 	a.cLog.Axis = layout.Vertical
 	a.cLog.ScrollToEnd = true
 
-	for _, e := range []*widget.Editor{&a.hWidth, &a.hHeight, &a.hFPS, &a.hBitrate, &a.hPort, &a.cPort, &a.cFifo, &a.cFPS, &a.cCamW, &a.cCamH} {
+	for _, e := range []*widget.Editor{&a.hWidth, &a.hHeight, &a.hFPS, &a.hBitrate, &a.hPort, &a.cPort, &a.cFifo} {
 		e.SingleLine = true
 		e.Filter = "0123456789"
 	}
-	for _, e := range []*widget.Editor{&a.hSource, &a.hDestIP, &a.hExtra, &a.cDevice, &a.cPixFmt, &a.cExtra} {
+	for _, e := range []*widget.Editor{&a.hSource, &a.hDestIP, &a.hExtra, &a.cDevice, &a.cExtra} {
 		e.SingleLine = true
 	}
 	a.presets = []presetBtn{
@@ -185,25 +182,20 @@ func (a *App) loadFromConfig(cfg config.Config) {
 	a.hExtra.SetText(h.ExtraArgs)
 	a.hCursor.Value = h.CaptureCursor
 	a.hBackend = h.Backend
+	a.hTargetIdx = slices.Index(config.TargetAspects, h.TargetAspect)
+	if a.hTargetIdx < 0 {
+		a.hTargetIdx = 0
+	}
 
 	c := cfg.Client
 	a.cPort.SetText(strconv.Itoa(c.ListenPort))
 	a.cFifo.SetText(strconv.Itoa(c.FifoSize))
-	a.cFPS.SetText(strconv.Itoa(c.FPS))
-	a.cCamW.SetText(strconv.Itoa(c.CamWidth))
-	a.cCamH.SetText(strconv.Itoa(c.CamHeight))
-	a.cOutputMode = c.OutputMode
-	if a.cOutputMode != config.OutputFollow {
-		a.cOutputMode = config.OutputFixed
-	}
 	a.cDevice.SetText(c.OutputDevice)
-	a.cPixFmt.SetText(c.PixFmt)
 	a.cExtra.SetText(c.ExtraArgs)
 	a.cLowDelay.Value = c.LowDelay
-	a.cRestore.Value = c.RestoreAspect
-	a.cTargetIdx = slices.Index(config.TargetAspects, c.TargetAspect)
-	if a.cTargetIdx < 0 {
-		a.cTargetIdx = 0
+	a.cCamWidth, a.cCamHeight = c.CamWidth, c.CamHeight
+	if a.cCamWidth <= 0 || a.cCamHeight <= 0 {
+		a.cCamWidth, a.cCamHeight = 1280, 720
 	}
 }
 
@@ -232,23 +224,16 @@ func (a *App) assemble() config.Config {
 			DestIP:        a.hDestIP.Text(),
 			DestPort:      atoi(a.hPort.Text()),
 			ExtraArgs:     a.hExtra.Text(),
-			// 実画面比を埋め込む。Width:Height と異なれば自動でアナモルフィック送出。
-			DARNum: a.screenW,
-			DARDen: a.screenH,
+			TargetAspect:  config.TargetAspects[a.hTargetIdx],
 		},
 		Client: config.ClientConfig{
-			ListenPort:    atoi(a.cPort.Text()),
-			OutputDevice:  a.cDevice.Text(),
-			PixFmt:        a.cPixFmt.Text(),
-			FifoSize:      atoi(a.cFifo.Text()),
-			FPS:           atoi(a.cFPS.Text()),
-			LowDelay:      a.cLowDelay.Value,
-			ExtraArgs:     a.cExtra.Text(),
-			RestoreAspect: a.cRestore.Value,
-			TargetAspect:  config.TargetAspects[a.cTargetIdx],
-			OutputMode:    a.cOutputMode,
-			CamWidth:      atoi(a.cCamW.Text()),
-			CamHeight:     atoi(a.cCamH.Text()),
+			ListenPort:   atoi(a.cPort.Text()),
+			OutputDevice: a.cDevice.Text(),
+			FifoSize:     atoi(a.cFifo.Text()),
+			LowDelay:     a.cLowDelay.Value,
+			ExtraArgs:    a.cExtra.Text(),
+			CamWidth:     a.cCamWidth,
+			CamHeight:    a.cCamHeight,
 		},
 	}
 }
@@ -465,8 +450,16 @@ func (a *App) startClient() {
 		return
 	}
 	live := ffmpeg.ClientArgs(cfg.Client)
-	ph := ffmpeg.ClientPlaceholderArgs(cfg.Client)
-	if err := a.clientSup.Start(a.ffmpegBin, live, ph, cfg.Client.ListenPort); err != nil {
+	phFn := func(w, h int) []string { return ffmpeg.ClientPlaceholderArgs(w, h, cfg.Client) }
+	// 受信解像度を学習したら待機映像をその寸法へ追従させ、設定にも永続化する
+	// （次回起動時の待機映像を最初からホスト寸法に合わせ、初回シアーも避ける）。
+	a.clientSup.OnFormat = func(w, h int) {
+		a.cCamWidth, a.cCamHeight = w, h
+		full, _ := config.Load()
+		full.Client.CamWidth, full.Client.CamHeight = w, h
+		_ = config.Save(full)
+	}
+	if err := a.clientSup.Start(a.ffmpegBin, live, phFn, cfg.Client.ListenPort, cfg.Client.CamWidth, cfg.Client.CamHeight); err != nil {
 		a.status = "Client: " + err.Error()
 		return
 	}
@@ -526,20 +519,14 @@ func (a *App) handleEvents(gtx C) {
 	for i := range a.presets {
 		if a.presets[i].btn.Clicked(gtx) {
 			h := a.presets[i].height
-			// 縦を基準に、画面比を保った横解像度を 16 整列で自動算出する。
+			// 縦を基準に、目標比率（未指定なら画面比）を保った横解像度を 16 整列で自動算出する。
+			aw, ah := a.presetAspect()
 			a.hHeight.SetText(strconv.Itoa(h))
-			a.hWidth.SetText(strconv.Itoa(ffmpeg.PresetWidth(h, a.screenW, a.screenH)))
+			a.hWidth.SetText(strconv.Itoa(ffmpeg.PresetWidth(h, aw, ah)))
 		}
 	}
-	if a.cTargetBtn.Clicked(gtx) {
-		a.cTargetIdx = (a.cTargetIdx + 1) % len(config.TargetAspects)
-	}
-	if a.cModeBtn.Clicked(gtx) {
-		if a.cOutputMode == config.OutputFollow {
-			a.cOutputMode = config.OutputFixed
-		} else {
-			a.cOutputMode = config.OutputFollow
-		}
+	if a.hTargetBtn.Clicked(gtx) {
+		a.hTargetIdx = (a.hTargetIdx + 1) % len(config.TargetAspects)
 	}
 	if a.hEncBtn.Clicked(gtx) && len(a.hEncoders) > 0 {
 		a.hEncIdx = (a.hEncIdx + 1) % len(a.hEncoders)
@@ -672,8 +659,16 @@ func (a *App) hostTab(gtx C) D {
 	return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
 		layout.Rigid(a.warnIfNotReady(ready, &a.hGotoSetup)),
 		layout.Rigid(a.macPermRow()),
+		layout.Rigid(func(gtx C) D {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(a.labelCell("目標比率")),
+				layout.Rigid(func(gtx C) D {
+					return material.Button(a.th, &a.hTargetBtn, targetAspectLabel(a.hTargetIdx)).Layout(gtx)
+				}),
+			)
+		}),
+		layout.Rigid(a.hint(a.presetAspectHint())),
 		layout.Rigid(a.presetRow),
-		layout.Rigid(a.hint(a.screenAspectHint())),
 		layout.Rigid(spacer(4)),
 		layout.Rigid(func(gtx C) D {
 			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
@@ -683,7 +678,7 @@ func (a *App) hostTab(gtx C) D {
 				layout.Flexed(1, a.boxedEditor(&a.hHeight)),
 			)
 		}),
-		layout.Rigid(a.hint(a.anamorphicHint())),
+		layout.Rigid(a.hint("送出は 幅×高さ をそのまま使用（受信側は無加工）。")),
 		layout.Rigid(a.field("FPS", &a.hFPS)),
 		layout.Rigid(a.field("ビットレート(kbps)", &a.hBitrate)),
 		layout.Rigid(func(gtx C) D {
@@ -726,7 +721,6 @@ func (a *App) hostTab(gtx C) D {
 func (a *App) clientTab(gtx C) D {
 	ready := a.clientDeps.OK()
 	running := a.clientSup.Running()
-	fixed := a.cOutputMode != config.OutputFollow
 
 	clientBanner := a.warnIfNotReady(ready, &a.cGotoSetup)
 	if runtime.GOOS != "linux" {
@@ -737,45 +731,11 @@ func (a *App) clientTab(gtx C) D {
 		layout.Rigid(clientBanner),
 		layout.Rigid(a.field("受信ポート", &a.cPort)),
 		layout.Rigid(a.field("バッファ(fifo_size)", &a.cFifo)),
-		layout.Rigid(a.field("FPS(仮想カメラ提示 / 0=ソースのまま)", &a.cFPS)),
-		layout.Rigid(a.hint("ホストの FPS に合わせる。固定 fps で提示するとDiscord の高 fps GoLive（例 1080p60）でのクラッシュを避けられる。")),
-		layout.Rigid(func(gtx C) D {
-			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(a.labelCell("出力モード")),
-				layout.Rigid(func(gtx C) D {
-					return material.Button(a.th, &a.cModeBtn, outputModeLabel(a.cOutputMode)).Layout(gtx)
-				}),
-			)
-		}),
-		layout.Rigid(a.hint(outputModeHint(fixed))),
-		layout.Rigid(func(gtx C) D {
-			if !fixed {
-				return D{} // follow ではカメラ解像度はホスト追従なので入力不要
-			}
-			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(a.labelCell("カメラ解像度")),
-				layout.Rigid(func(gtx C) D { return a.boxedEditor(&a.cCamW)(gtx) }),
-				layout.Rigid(a.labelCell(" × ")),
-				layout.Rigid(func(gtx C) D { return a.boxedEditor(&a.cCamH)(gtx) }),
-			)
-		}),
 		layout.Rigid(a.field("出力デバイス", &a.cDevice)),
-		layout.Rigid(a.field("ピクセル形式", &a.cPixFmt)),
 		layout.Rigid(func(gtx C) D {
 			return material.CheckBox(a.th, &a.cLowDelay, "低遅延 (nobuffer + low_delay)").Layout(gtx)
 		}),
-		layout.Rigid(func(gtx C) D {
-			return material.CheckBox(a.th, &a.cRestore, "アスペクト復元（送信側の実画面比へ伸長）").Layout(gtx)
-		}),
-		layout.Rigid(func(gtx C) D {
-			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
-				layout.Rigid(a.labelCell("目標比率(端を黒埋め)")),
-				layout.Rigid(func(gtx C) D {
-					return material.Button(a.th, &a.cTargetBtn, targetAspectLabel(a.cTargetIdx)).Layout(gtx)
-				}),
-			)
-		}),
-		layout.Rigid(a.hint(a.clientFilterHint())),
+		layout.Rigid(a.hint("解像度・FPS・アスペクト・ピクセル形式はホスト送出をそのまま使用（無加工）。待機映像もホストの解像度に自動追従します。")),
 		layout.Rigid(a.field("追加引数", &a.cExtra)),
 		layout.Rigid(spacer(4)),
 		layout.Rigid(material.Body2(a.th, "実行コマンド:").Layout),
@@ -979,44 +939,26 @@ func (a *App) encoderLabel() string {
 	return "(なし)"
 }
 
-// screenAspectHint は検出した画面比を説明するヒント文を返す。
-func (a *App) screenAspectHint() string {
+// presetAspect はプリセットの横ドット数算出に使う比 (aw, ah) を返す。
+// 目標比率が指定されていればそれを、"" なら検出した画面比（未検出なら 0,0=PresetWidth が 16:9 扱い）を使う。
+func (a *App) presetAspect() (int, int) {
+	if num, den, ok := ffmpeg.ParseAspect(config.TargetAspects[a.hTargetIdx]); ok {
+		return num, den
+	}
+	return a.screenW, a.screenH
+}
+
+// presetAspectHint はプリセット横算出に使う比の説明を返す。
+func (a *App) presetAspectHint() string {
+	if config.TargetAspects[a.hTargetIdx] != "" {
+		return "プリセット選択時、横は上の目標比率から自動算出（16整列）。"
+	}
 	if a.screenW <= 0 || a.screenH <= 0 {
-		return "プリセットは縦基準・横は画面比から自動算出（画面比は未検出のため 16:9 とみなします）。"
+		return "目標比率「画面そのまま」＝画面比から横を自動算出（未検出のため 16:9 とみなします）。"
 	}
 	g := gcd(a.screenW, a.screenH)
-	return fmt.Sprintf("メイン画面比 %d:%d（%d×%d）。プリセットは縦基準で横を自動算出。別画面をキャプチャする場合は比が異なることがあります。",
+	return fmt.Sprintf("目標比率「画面そのまま」＝検出した画面比 %d:%d（%d×%d）で横を自動算出。",
 		a.screenW/g, a.screenH/g, a.screenW, a.screenH)
-}
-
-// anamorphicHint は現在の幅×高さが画面比と異なるとき、アナモルフィック送出に
-// なる旨を知らせる。
-func (a *App) anamorphicHint() string {
-	w, h := atoi(a.hWidth.Text()), atoi(a.hHeight.Text())
-	if w <= 0 || h <= 0 || a.screenW <= 0 || a.screenH <= 0 {
-		return ""
-	}
-	if w*a.screenH == h*a.screenW {
-		return "" // 画面比と一致（歪み無し）。
-	}
-	return "※ 現在の幅×高さは画面比と異なります。圧縮映像＋実画面比メタデータ（アナモルフィック）で送出し、受信側で復元します。"
-}
-
-// clientFilterHint は、追加引数の独自 -vf が復元/目標比率より優先される旨を
-// 該当時のみ知らせる。
-func (a *App) clientFilterHint() string {
-	c := a.assemble().Client
-	hasVF := ffmpeg.HasVideoFilter(c.ExtraArgs)
-	if c.OutputMode == config.OutputFixed {
-		if hasVF {
-			return "※ 固定モードでは追加引数の -vf は固定枠フィルタの前段へ合成されます（固定枠は常に適用）。"
-		}
-		return ""
-	}
-	if (c.RestoreAspect || c.TargetAspect != "") && hasVF {
-		return "※ 追加引数に -vf があるため、アスペクト復元・目標比率は適用されません（追加引数を優先）。"
-	}
-	return ""
 }
 
 func gcd(a, b int) int {
@@ -1033,23 +975,9 @@ func gcd(a, b int) int {
 func targetAspectLabel(idx int) string {
 	v := config.TargetAspects[idx]
 	if v == "" {
-		v = "なし"
+		v = "画面そのまま"
 	}
 	return fmt.Sprintf("(%d/%d) %s ▸", idx+1, len(config.TargetAspects), v)
-}
-
-func outputModeLabel(mode string) string {
-	if mode == config.OutputFollow {
-		return "follow（ホスト追従）▸"
-	}
-	return "fixed（固定スケール）▸"
-}
-
-func outputModeHint(fixed bool) string {
-	if fixed {
-		return "固定: 受信映像をカメラ解像度へスケール/黒帯。ホスト解像度が変わっても・再接続しても落ちない（推奨）。"
-	}
-	return "follow: ホスト解像度に追従。カメラ=ホスト解像度だが、変更/再接続のたびに Discord がカメラを開き直す（不安定になりうる）。"
 }
 
 func setIfChanged(ed *widget.Editor, cache *string, val string) {

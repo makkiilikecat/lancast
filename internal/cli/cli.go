@@ -162,8 +162,14 @@ func runClient(bin string, c config.ClientConfig) int {
 	sup.OnState = func(st string) { logf("状態: %s", st) }
 
 	live := ffmpeg.ClientArgs(c)
-	ph := ffmpeg.ClientPlaceholderArgs(c)
-	if err := sup.Start(bin, live, ph, c.ListenPort); err != nil {
+	phFn := func(w, h int) []string { return ffmpeg.ClientPlaceholderArgs(w, h, c) }
+	// 受信解像度を学習したら設定へ永続化（次回の待機映像を最初からホスト寸法に合わせる）。
+	sup.OnFormat = func(w, h int) {
+		full, _ := config.Load()
+		full.Client.CamWidth, full.Client.CamHeight = w, h
+		_ = config.Save(full)
+	}
+	if err := sup.Start(bin, live, phFn, c.ListenPort, c.CamWidth, c.CamHeight); err != nil {
 		fmt.Fprintln(os.Stderr, "[lancast] 起動失敗:", err)
 		return 1
 	}
