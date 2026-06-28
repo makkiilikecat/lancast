@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -75,21 +76,32 @@ func RunHeadless(cfg config.Config, mode Mode, debug bool) int {
 	logf("ffmpeg=%s", bin)
 	logf("exec: %s", ffmpeg.Preview(bin, args))
 
+	if mode == ModeClient {
+		return runClient(bin, cfg.Client)
+	}
+
 	r := runner.New()
 	// frame= 進捗は流れすぎるため 2 秒に 1 回に間引き、最初の 1 回で「稼働中」を明示する。
-	streamUp := false
-	var lastFrame time.Time
+	// OnLine は stdout/stderr の 2 本の pump goroutine から並行に呼ばれ得るため mu で保護する。
+	var (
+		mu        sync.Mutex
+		streamUp  bool
+		lastFrame time.Time
+	)
 	r.OnLine = func(s string) {
 		if strings.HasPrefix(s, "frame=") {
+			mu.Lock()
 			if !streamUp {
 				streamUp = true
 				logf("ストリーム稼働中（映像フレームを確認）")
 			}
 			now := time.Now()
 			if now.Sub(lastFrame) < 2*time.Second {
+				mu.Unlock()
 				return
 			}
 			lastFrame = now
+			mu.Unlock()
 		}
 		fmt.Println(s)
 	}
@@ -97,13 +109,7 @@ func RunHeadless(cfg config.Config, mode Mode, debug bool) int {
 		fmt.Fprintln(os.Stderr, "[lancast] 起動失敗:", err)
 		return 1
 	}
-	switch mode {
-	case ModeClient:
-		logf("ポート %d で受信待機中…（送信側 lancast -host の開始を待っています）", cfg.Client.ListenPort)
-		logf("受信開始後に Discord を開き、カメラ「MacScreen」を選択してください。")
-	case ModeHost:
-		logf("%s:%d へ送信開始（UDP のため受信側の有無は検知できません。受信側を先に起動してください）", cfg.Host.DestIP, cfg.Host.DestPort)
-	}
+	logf("%s:%d へ送信開始（UDP のため受信側の有無は検知できません。受信側を先に起動してください）", cfg.Host.DestIP, cfg.Host.DestPort)
 	logf("停止するには Ctrl-C。")
 
 	sig := make(chan os.Signal, 1)
@@ -127,6 +133,51 @@ func RunHeadless(cfg config.Config, mode Mode, debug bool) int {
 			}
 		}
 	}
+}
+
+// runClient は受信側を ClientSupervisor で常駐起動する。待機⇄ライブを自動で切り替え、
+// ホストの開始/停止/解像度変更/一時切断に追従して仮想カメラを途切れさせない。
+// SIGINT/SIGTERM で停止して 0 を返す。
+func runClient(bin string, c config.ClientConfig) int {
+	sup := runner.NewClientSupervisor()
+	// OnLine は内部 Runner の stdout/stderr 2 本の pump goroutine から並行に呼ばれ得る。
+	var (
+		mu        sync.Mutex
+		lastFrame time.Time
+	)
+	sup.OnLine = func(s string) {
+		if strings.HasPrefix(s, "frame=") {
+			mu.Lock()
+			skip := time.Since(lastFrame) < 2*time.Second
+			if !skip {
+				lastFrame = time.Now()
+			}
+			mu.Unlock()
+			if skip {
+				return
+			}
+		}
+		fmt.Println(s)
+	}
+	sup.OnState = func(st string) { logf("状態: %s", st) }
+
+	live := ffmpeg.ClientArgs(c)
+	ph := ffmpeg.ClientPlaceholderArgs(c)
+	if err := sup.Start(bin, live, ph, c.ListenPort); err != nil {
+		fmt.Fprintln(os.Stderr, "[lancast] 起動失敗:", err)
+		return 1
+	}
+	logf("待機映像で仮想カメラを起動しました。Discord でカメラ「MacScreen」を選択（いつ開いてもOK）。")
+	logf("ポート %d を監視中…ホスト送出を検出すると自動でライブへ切り替わります。", c.ListenPort)
+	logf("停止するには Ctrl-C。")
+
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	<-sig
+	logf("停止シグナル受信、停止中…")
+	sup.Stop()
+	logf("終了")
+	return 0
 }
 
 // waitStopped はプロセス停止を最大 3.5 秒待ち、停止できたら true を返す。

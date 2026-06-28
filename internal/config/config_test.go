@@ -106,6 +106,30 @@ func TestClientValidate(t *testing.T) {
 	if good.Validate() != "" {
 		t.Error("FPS=0(ソースのまま) は許容されるべき")
 	}
+	bad = ok
+	bad.OutputMode = "weird"
+	if bad.Validate() == "" {
+		t.Error("不正な出力モードが検出されない")
+	}
+	bad = ok
+	bad.OutputMode = OutputFixed
+	bad.CamWidth = 0
+	if bad.Validate() == "" {
+		t.Error("固定モードでカメラ幅0 が検出されない")
+	}
+	good = ok
+	good.OutputMode = OutputFollow
+	good.CamWidth, good.CamHeight = 0, 0 // follow ではカメラ解像度不要
+	if good.Validate() != "" {
+		t.Error("follow モードはカメラ解像度0でも許容されるべき")
+	}
+}
+
+func TestDefaultClientOutputMode(t *testing.T) {
+	c := DefaultConfigFor("linux").Client
+	if c.OutputMode != OutputFixed || c.CamWidth != 1920 || c.CamHeight != 1080 {
+		t.Errorf("既定の Client 出力モードが不正: %+v", c)
+	}
 }
 
 func TestLoadMissingReturnsDefault(t *testing.T) {

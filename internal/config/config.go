@@ -51,8 +51,27 @@ type ClientConfig struct {
 	RestoreAspect bool `json:"restore_aspect"`
 	// TargetAspect は仮想カメラへ出す前に、指定比率の枠へ収まるよう端を黒で
 	// 埋める（レターボックス/ピラーボックス）。"" は無加工。例: "16:9" "9:16"。
+	// OutputMode="fixed" のときは CamWidth/CamHeight が枠を決めるため無視される。
 	TargetAspect string `json:"target_aspect"`
+
+	// OutputMode は仮想カメラへ出す解像度の決め方。
+	//   "fixed":  常に CamWidth×CamHeight の一定フォーマットへスケール/パディングして出す。
+	//             ホスト解像度が変わっても仮想カメラのフォーマットは不変なので、再接続・
+	//             解像度変更で Discord(Chromium) が落ちない（推奨）。
+	//   "follow": ホストの送出解像度にそのまま追従する。フォーマットがホストに合うが、
+	//             解像度が変わるたびに仮想カメラを作り直す必要があり、Discord が
+	//             カメラを開き直す（クラッシュ/再選択が起きうる）。
+	OutputMode string `json:"output_mode"`
+	// CamWidth/CamHeight は OutputMode="fixed" で仮想カメラへ提示する固定解像度。
+	CamWidth  int `json:"cam_width"`
+	CamHeight int `json:"cam_height"`
 }
+
+// 出力モードの定数。
+const (
+	OutputFixed  = "fixed"
+	OutputFollow = "follow"
+)
 
 // Config はアプリ全体の設定。
 type Config struct {
@@ -105,6 +124,10 @@ func DefaultConfigFor(goos string) Config {
 		// 既定はホスト既定 FPS に合わせ、仮想カメラへ固定 fps で提示する
 		// （無指定の不定 framerate による Discord クラッシュを既定で避ける）。
 		FPS: host.FPS,
+		// 既定は固定フォーマット出力（再接続・解像度変更に強い）。
+		OutputMode: OutputFixed,
+		CamWidth:   1920,
+		CamHeight:  1080,
 	}
 	return Config{Host: host, Client: client}
 }
@@ -157,6 +180,10 @@ func (c ClientConfig) Validate() string {
 		return "ピクセル形式を入力してください"
 	case c.FPS < 0:
 		return "FPS は 0(ソースのまま) 以上で指定してください"
+	case c.OutputMode != OutputFixed && c.OutputMode != OutputFollow:
+		return "出力モードは fixed か follow を指定してください"
+	case c.OutputMode == OutputFixed && (c.CamWidth <= 0 || c.CamHeight <= 0):
+		return "固定モードのカメラ解像度(幅・高さ)を 1 以上で指定してください"
 	case !validTargetAspect(c.TargetAspect):
 		return "目標比率の指定が不正です"
 	}

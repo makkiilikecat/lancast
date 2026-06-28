@@ -181,24 +181,84 @@ func ClientArgs(c config.ClientConfig) []string {
 	args = append(args, "-i", url)
 
 	extra := splitArgs(c.ExtraArgs)
-	args = append(args, extra...)
 
-	// ユーザーが追加引数で独自の映像フィルタを指定している場合、本機能の -vf と
-	// 二重指定になり ffmpeg は片方を黙って捨てる。衝突を避けるためユーザー指定を
-	// 優先し、本機能のフィルタは付けない（その旨は UI のヒントで周知する）。
-	if vf := clientVF(c); vf != "" && !hasVideoFilter(extra) {
-		args = append(args, "-vf", vf)
-	}
-
-	// 仮想カメラへ N fps の CFR で提示する。-r は出力レートを固定し、フレーム
-	// 到達タイミングを安定させる（不定 framerate による Discord クラッシュ回避）。
-	// 0 は無指定＝送信ストリーム任せ（従来挙動）。
-	if c.FPS > 0 {
-		args = append(args, "-r", strconv.Itoa(c.FPS))
+	if c.OutputMode == config.OutputFixed {
+		// fixed: 固定枠フィルタは必須（外れると待機⇄ライブで寸法が食い違い再接続で落ちる）。
+		// ユーザーが追加引数で -vf を指定していたら、その鎖を固定枠の前段へ合成して
+		// 1本の -vf にまとめる（-vf 二重指定は ffmpeg がエラーになるため）。
+		userVF, rest := extractVF(extra)
+		args = append(args, rest...)
+		chain := fixedVF(c)
+		if userVF != "" {
+			chain = userVF + "," + chain
+		}
+		args = append(args, "-vf", chain)
+		// 出力フレームレートも固定（待機映像と同一 fps）。
+		_, _, fps := camCanvas(c)
+		args = append(args, "-r", strconv.Itoa(fps))
+	} else {
+		args = append(args, extra...)
+		// follow: ユーザーが独自の -vf を指定していれば二重指定回避で本機能の -vf は付けない。
+		if vf := followVF(c); vf != "" && !hasVideoFilter(extra) {
+			args = append(args, "-vf", vf)
+		}
+		// 仮想カメラへ N fps の CFR で提示する。0 は送信ストリーム任せ（従来挙動）。
+		if c.FPS > 0 {
+			args = append(args, "-r", strconv.Itoa(c.FPS))
+		}
 	}
 
 	args = append(args, "-pix_fmt", c.PixFmt, "-f", "v4l2", c.OutputDevice)
 	return args
+}
+
+// PlaceholderColor は待機映像の背景色（ffmpeg color フィルタ用）。
+const PlaceholderColor = "0x1e1e1e"
+
+// ClientPlaceholderArgs は「待機中」映像を仮想カメラへ流し続ける引数列を生成する。
+// 受信ストリームが無い間（開始直後・ホスト停止中）も仮想カメラを生かし続け、Discord が
+// カメラを失わないようにする。寸法・FPS・ピクセル形式を camCanvas でライブ(fixed)と
+// 同一値に揃えることで、待機⇄ライブを切り替えてもフォーマットが変わらずクラッシュを避ける。
+func ClientPlaceholderArgs(c config.ClientConfig) []string {
+	w, h, fps := camCanvas(c)
+	args := []string{"-hide_banner", "-loglevel", "warning", "-stats"}
+	args = append(args, "-f", "lavfi", "-i",
+		fmt.Sprintf("color=c=%s:s=%dx%d:r=%d", PlaceholderColor, w, h, fps))
+	args = append(args, "-pix_fmt", c.PixFmt, "-f", "v4l2", c.OutputDevice)
+	return args
+}
+
+// camCanvas は fixed モードで仮想カメラへ提示する正規化済みフォーマット（幅・高さ・fps）を返す。
+// 待機(placeholder)とライブ(fixedVF/ClientArgs)が必ず同一値を使うよう一箇所に集約する。
+// これが「全 writer が同一フォーマットで書く」=再接続で落ちない、の不変条件の根拠。
+//   - 幅は v4l2 のストライド由来シアー回避のため 16 の倍数へ（Align16）。
+//   - 高さは yuv420p の偶数制約のため偶数へ。
+//   - FPS は提示レートを確定させるため 1 以上へ（0=ソースのままは fixed では使わない）。
+func camCanvas(c config.ClientConfig) (w, h, fps int) {
+	w = Align16(c.CamWidth)
+	h = c.CamHeight / 2 * 2
+	if h < 2 {
+		h = 2
+	}
+	fps = c.FPS
+	if fps <= 0 {
+		fps = 30
+	}
+	return w, h, fps
+}
+
+// extractVF は引数列から先頭の -vf/-filter:v の値を取り出し、それ以外の引数を rest に残す。
+// fixed モードでユーザー指定フィルタを固定枠フィルタの前段へ合成するために使う。
+func extractVF(args []string) (vf string, rest []string) {
+	for i := 0; i < len(args); i++ {
+		if (args[i] == "-vf" || args[i] == "-filter:v") && i+1 < len(args) && vf == "" {
+			vf = args[i+1]
+			i++ // 値もスキップ
+			continue
+		}
+		rest = append(rest, args[i])
+	}
+	return vf, rest
 }
 
 // HasVideoFilter は追加引数文字列に映像フィルタ指定が含まれるかを返す（UI 警告用）。
@@ -217,9 +277,28 @@ func hasVideoFilter(args []string) bool {
 	return false
 }
 
-// clientVF は復元（SAR→正方ピクセル）と目標比率パディングのフィルタ鎖を組む。
-// どちらも不要なら空（無加工＝従来挙動）。
-func clientVF(c config.ClientConfig) string {
+// fixedVF は受信映像を camCanvas の固定フォーマット（幅16整列・高さ偶数・固定fps）へ
+// スケール/パディングする。入力解像度が何であれ出力は固定なので、ホスト側が解像度を
+// 変えても・再接続しても仮想カメラのフォーマットは変わらず、Discord(Chromium) が落ちない。
+func fixedVF(c config.ClientConfig) string {
+	w, h, fps := camCanvas(c)
+	var f []string
+	if c.RestoreAspect {
+		// 受信 SAR を反映して実比率の幅へ伸長してから固定枠へ収める。
+		f = append(f, "scale='trunc(iw*sar/2)*2':ih", "setsar=1")
+	}
+	// アスペクト比を保ったまま固定枠へ収め、余白を黒で中央パディングする。
+	f = append(f,
+		fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", w, h),
+		fmt.Sprintf("pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black", w, h),
+		"setsar=1",
+		"fps="+strconv.Itoa(fps),
+	)
+	return strings.Join(f, ",")
+}
+
+// followVF はホスト解像度に追従する従来のフィルタ鎖（復元＋目標比率パディング）。
+func followVF(c config.ClientConfig) string {
 	var f []string
 	if c.FPS > 0 {
 		// フレームを N fps へ正規化（重複/間引き）し、CFR で仮想カメラへ渡す。

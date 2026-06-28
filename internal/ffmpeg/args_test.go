@@ -1,6 +1,7 @@
 package ffmpeg
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -110,17 +111,76 @@ func TestClientArgs_FPSSetsCFR(t *testing.T) {
 
 func TestClientArgs_FPSZeroNoRate(t *testing.T) {
 	c := config.DefaultConfigFor("linux").Client
+	c.OutputMode = config.OutputFollow // follow のみ FPS=0=ソースのまま
 	c.FPS = 0
 	c.RestoreAspect = false
 	c.TargetAspect = ""
 	got := argStr(ClientArgs(c))
 	if strings.Contains(got, "-r ") || strings.Contains(got, "fps=") {
-		t.Errorf("FPS=0(ソースのまま)では fps/-r を付けない: %s", got)
+		t.Errorf("follow + FPS=0(ソースのまま)では fps/-r を付けない: %s", got)
+	}
+}
+
+func TestClientArgs_FixedForcesFPSEvenWhenZero(t *testing.T) {
+	// fixed では待機⇄ライブのフォーマット一致のため FPS=0 でも固定 fps(30) を必ず付ける。
+	c := config.DefaultConfigFor("linux").Client // fixed
+	c.FPS = 0
+	got := argStr(ClientArgs(c))
+	if !strings.Contains(got, "-r 30") || !strings.Contains(got, "fps=30") {
+		t.Errorf("fixed + FPS=0 では固定 fps 30 を付けるべき: %s", got)
+	}
+	// 待機映像も同一 fps・解像度であること。
+	ph := argStr(ClientPlaceholderArgs(c))
+	if !strings.Contains(ph, "s=1920x1080:r=30") {
+		t.Errorf("待機映像がライブと同一フォーマットでない: %s", ph)
+	}
+}
+
+func TestCamCanvasNormalizesDims(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client
+	c.OutputMode = config.OutputFixed
+	c.CamWidth, c.CamHeight, c.FPS = 1000, 563, 0 // 非16倍数・奇数・fps0
+	w, h, fps := camCanvas(c)
+	if w%16 != 0 {
+		t.Errorf("幅が16の倍数でない: %d", w)
+	}
+	if h%2 != 0 {
+		t.Errorf("高さが偶数でない: %d", h)
+	}
+	if fps != 30 {
+		t.Errorf("FPS=0 が固定値へ正規化されていない: %d", fps)
+	}
+	// ライブと待機が同じ正規化値を使うこと（食い違い＝再接続クラッシュの原因を排除）。
+	live := argStr(ClientArgs(c))
+	ph := argStr(ClientPlaceholderArgs(c))
+	dim := fmt.Sprintf("%dx%d", w, h)
+	if !strings.Contains(ph, "s="+dim) {
+		t.Errorf("待機映像の寸法が正規化値 %s と一致しない: %s", dim, ph)
+	}
+	if !strings.Contains(live, fmt.Sprintf("scale=%d:%d:force_original_aspect_ratio=decrease", w, h)) {
+		t.Errorf("ライブの寸法が正規化値 %s と一致しない: %s", dim, live)
+	}
+}
+
+func TestClientArgs_FixedComposesUserVF(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client // fixed
+	c.ExtraArgs = "-vf hflip"
+	got := argStr(ClientArgs(c))
+	// ユーザー -vf は捨てず固定枠の前段へ合成し、-vf は1つだけ。
+	if strings.Count(got, "-vf") != 1 {
+		t.Errorf("fixed で -vf が二重指定になっている: %s", got)
+	}
+	if !strings.Contains(got, "-vf hflip,") {
+		t.Errorf("fixed でユーザー -vf が固定枠の前段へ合成されていない: %s", got)
+	}
+	if !strings.Contains(got, "scale=1920:1080:force_original_aspect_ratio=decrease") {
+		t.Errorf("fixed の固定枠スケールが欠落: %s", got)
 	}
 }
 
 func TestClientArgs_FPSWithUserVF_RateStillForced(t *testing.T) {
 	c := config.DefaultConfigFor("linux").Client
+	c.OutputMode = config.OutputFollow // follow: ユーザー -vf があれば本機能の -vf は付けない
 	c.FPS = 60
 	c.ExtraArgs = "-vf hflip"
 	got := argStr(ClientArgs(c))
@@ -133,6 +193,63 @@ func TestClientArgs_FPSWithUserVF_RateStillForced(t *testing.T) {
 	}
 	if strings.Count(got, "-vf") != 1 {
 		t.Errorf("-vf が二重指定になっている: %s", got)
+	}
+}
+
+func TestClientArgs_FixedModeConstantFormat(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client // 既定 fixed / 1920x1080
+	c.FPS = 60
+	got := argStr(ClientArgs(c))
+	for _, want := range []string{
+		"scale=1920:1080:force_original_aspect_ratio=decrease",
+		"pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
+		"-r 60", "-pix_fmt yuv420p", "-f v4l2 /dev/video10",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("fixed モードに期待する引数 %q が無い: %s", want, got)
+		}
+	}
+	// 入力解像度に依存する follow 用 padToAspect は出てはならない。
+	if strings.Contains(got, "ceil(max(iw") {
+		t.Errorf("fixed モードで follow 用の比率 pad が混入: %s", got)
+	}
+}
+
+func TestClientArgs_FollowModeUnchanged(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client
+	c.OutputMode = config.OutputFollow
+	c.RestoreAspect = true
+	c.TargetAspect = "16:9"
+	got := argStr(ClientArgs(c))
+	for _, want := range []string{
+		"scale='trunc(iw*sar/2)*2':ih", "setsar=1",
+		"pad=w='ceil(max(iw,ih*16/9)/16)*16'",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("follow モードに期待する引数 %q が無い: %s", want, got)
+		}
+	}
+	// follow では固定キャンバスへの scale は出ない。
+	if strings.Contains(got, "force_original_aspect_ratio") {
+		t.Errorf("follow モードに固定スケールが混入: %s", got)
+	}
+}
+
+func TestClientPlaceholderArgs(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client
+	c.FPS = 60
+	got := argStr(ClientPlaceholderArgs(c))
+	for _, want := range []string{
+		"-f lavfi", "color=c=0x1e1e1e:s=1920x1080:r=60",
+		"-pix_fmt yuv420p", "-f v4l2 /dev/video10",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("待機映像に期待する引数 %q が無い: %s", want, got)
+		}
+	}
+	// 待機映像は受信(UDP)入力を持たない。
+	if strings.Contains(got, "udp://") {
+		t.Errorf("待機映像に UDP 入力が混入: %s", got)
 	}
 }
 
@@ -186,6 +303,7 @@ func TestHostArgs_NoAnamorphicWhenAspectMatches(t *testing.T) {
 
 func TestClientArgs_RestoreAndPad(t *testing.T) {
 	c := config.DefaultConfigFor("linux").Client
+	c.OutputMode = config.OutputFollow
 	c.RestoreAspect = true
 	c.TargetAspect = "16:9"
 	got := argStr(ClientArgs(c))
@@ -201,6 +319,7 @@ func TestClientArgs_RestoreAndPad(t *testing.T) {
 
 func TestClientArgs_UserVFTakesPrecedence(t *testing.T) {
 	c := config.DefaultConfigFor("linux").Client
+	c.OutputMode = config.OutputFollow
 	c.RestoreAspect = true
 	c.TargetAspect = "16:9"
 	c.ExtraArgs = "-vf hflip"
@@ -216,6 +335,7 @@ func TestClientArgs_UserVFTakesPrecedence(t *testing.T) {
 
 func TestClientArgs_NoVFWhenDisabled(t *testing.T) {
 	c := config.DefaultConfigFor("linux").Client
+	c.OutputMode = config.OutputFollow
 	c.RestoreAspect = false
 	c.TargetAspect = ""
 	c.FPS = 0 // fps 正規化も無効なら無加工

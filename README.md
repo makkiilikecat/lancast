@@ -33,12 +33,17 @@ sudo modprobe v4l2loopback devices=1 video_nr=10 card_label=MacScreen exclusive_
 
 ### 2. Client を起動（受信側 Ubuntu）
 
-`LANCast` を起動 → **Client (受信)** タブ → 受信ポート/出力デバイスを確認 → **開始**。
-（Discord は **開始後に** 開き、カメラ「MacScreen」を選択。`exclusive_caps=1` の仕様上、writer 接続後にしか仮想カメラとして見えない）
+`LANCast` を起動 → **Client (受信)** タブ → 受信ポート/出力デバイス/**出力モード**を確認 → **開始**。
+Client は開始した瞬間から**待機映像**で仮想カメラを生かし続けるので、**Discord は Client 開始後ならいつでも**開いてカメラ「MacScreen」を選択できる（`exclusive_caps=1` の仕様上、Client 開始＝writer 接続より前には仮想カメラとして見えない）。Host の送出を検出すると自動で映像へ切り替わり、Host を止めると待機映像へ戻る（再開で自動復帰）。
+
+**出力モード**:
+- **fixed（固定スケール・既定）**: 受信映像をカメラ解像度（既定 1920×1080）へスケール/黒帯で収める。ホスト解像度を変えても・再接続しても仮想カメラのフォーマットは不変で **Discord が落ちない**。下位の解像度/FPS は Discord 側で選んで配信できる。
+- **follow（ホスト追従）**: カメラ解像度をホスト送出に一致させる。歪みは無いが、解像度変更・再接続のたびにカメラを開き直すため不安定になりうる。
 
 ### 3. Host を起動（送信側 Mac）
 
-`LANCast` を起動 → **Host (送信)** タブ → 送信先 IP を受信側に設定 → **開始**。
+`LANCast` を起動 → **Host (送信)** タブ → 送信先 IP を受信側に設定 → **開始**。Host と Client は**どちらを先に起動してもよい**（UDP 送出のため順序非依存）。
+稼働中に解像度・FPS・ビットレート等を変えると、**送出を自動で貼り直して即反映**する（fixed モードの Client 側は自動で追従する）。
 
 > **macOS 初回のみ**: 「システム設定 > プライバシーとセキュリティ > 画面収録」で **LANCast**（コマンド実行時はターミナル）を許可し、アプリを再起動すること。未許可だと黒画面/失敗になる。Host タブの「画面収録を許可（システム設定を開く）」ボタンから直接開ける。
 
@@ -54,6 +59,8 @@ sudo modprobe v4l2loopback devices=1 video_nr=10 card_label=MacScreen exclusive_
 | `VIDIOC_G_FMT: Invalid argument`（受信側） | apt 版 v4l2loopback 0.12.x が kernel 6.17 と非互換。git 版 0.15+ を DKMS 導入 |
 | `Address already in use`（受信側） | 前回の ffmpeg がポートを掴んだまま。`lsof -iUDP:5004` で確認し残プロセスを終了（`pkill -f 'ffmpeg.*5004'`） |
 | Discord で 1080p 60fps GoLive を開始すると落ちる | 仮想カメラの提示フレームレートが不定だと Chromium のキャプチャ経路が高 fps で破綻し得る。Client タブの **FPS** をホストの FPS に合わせて固定し（`0=ソースのまま`、CLI は `-fps`）CFR で提示する。ホスト 60fps なら Client も 60 にする |
+| 一度停止して再開すると Discord が落ちる / 解像度がズレる | 受信を **fixed（固定スケール）モード**にする（既定）。受信映像を一定のカメラ解像度へ収めるため、再接続やホスト解像度変更でも仮想カメラのフォーマットが変わらず落ちない。follow（ホスト追従）モードは原理上カメラを開き直すため不安定になりうる |
+| ホストを止めるとカメラ映像が固まる/消える | Client は待機映像で仮想カメラを生かし続ける（数秒のフレーム停滞でホスト停止と判断し待機へ）。ホストを再開すれば自動でライブへ復帰する。Discord 側はカメラを選び直さなくてよい |
 | Mac で黒画面/`Configuration of video device failed` | 画面収録の許可が未設定。手順3の許可後にアプリ再起動 |
 | ffmpeg が「見つかりません」 | `brew install ffmpeg`（mac）/ `sudo apt install ffmpeg`（Linux）。GUI 版は Homebrew パスも自動探索する |
 

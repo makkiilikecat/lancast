@@ -69,8 +69,11 @@ type App struct {
 
 	// Client 入力。
 	cPort, cFifo, cFPS, cDevice, cPixFmt, cExtra widget.Editor
+	cCamW, cCamH                                 widget.Editor
 	cLowDelay                                    widget.Bool
 	cStart, cStop, cClear, cRecheck              widget.Clickable
+	cModeBtn                                     widget.Clickable
+	cOutputMode                                  string // config.OutputFixed / OutputFollow
 	cPrev                                        widget.Editor
 	cPrevCache                                   string
 	cPreviewOn                                   widget.Bool
@@ -87,11 +90,18 @@ type App struct {
 
 	hBackend string // OS 由来のキャプチャバックエンド（UI では編集しない）
 
-	hostRunner, clientRunner   *runner.Runner
+	hostRunner                 *runner.Runner
+	clientSup                  *runner.ClientSupervisor
 	hostPreview, clientPreview *preview.Preview
 	hostDeps, clientDeps       deps.Result
 	ffmpegBin                  string
 	status                     string
+
+	// ホスト稼働中に設定を変えたら自動で送出を貼り直すための状態。
+	hostApplied     config.HostConfig      // 最後に送出へ反映したホスト設定
+	hostDirtySince  time.Time              // 変更を検知した時刻（デバウンス用。zero=変更なし）
+	hostRestart     chan config.HostConfig // 貼り直しワーカーへの依頼（直列・畳み込み）
+	hostRestartDone chan error             // 貼り直し結果（UI スレッドで status へ反映）
 }
 
 type fixField struct {
@@ -112,9 +122,11 @@ func NewApp() *App {
 	th.Shaper = text.NewShaper(text.WithCollection(gofont.Collection()))
 
 	a := &App{
-		th:           th,
-		hostRunner:   runner.New(),
-		clientRunner: runner.New(),
+		th:              th,
+		hostRunner:      runner.New(),
+		clientSup:       runner.NewClientSupervisor(),
+		hostRestart:     make(chan config.HostConfig, 1),
+		hostRestartDone: make(chan error, 1),
 	}
 	invalidate := func() {
 		if a.win != nil {
@@ -128,7 +140,7 @@ func NewApp() *App {
 	a.cLog.Axis = layout.Vertical
 	a.cLog.ScrollToEnd = true
 
-	for _, e := range []*widget.Editor{&a.hWidth, &a.hHeight, &a.hFPS, &a.hBitrate, &a.hPort, &a.cPort, &a.cFifo, &a.cFPS} {
+	for _, e := range []*widget.Editor{&a.hWidth, &a.hHeight, &a.hFPS, &a.hBitrate, &a.hPort, &a.cPort, &a.cFifo, &a.cFPS, &a.cCamW, &a.cCamH} {
 		e.SingleLine = true
 		e.Filter = "0123456789"
 	}
@@ -178,6 +190,12 @@ func (a *App) loadFromConfig(cfg config.Config) {
 	a.cPort.SetText(strconv.Itoa(c.ListenPort))
 	a.cFifo.SetText(strconv.Itoa(c.FifoSize))
 	a.cFPS.SetText(strconv.Itoa(c.FPS))
+	a.cCamW.SetText(strconv.Itoa(c.CamWidth))
+	a.cCamH.SetText(strconv.Itoa(c.CamHeight))
+	a.cOutputMode = c.OutputMode
+	if a.cOutputMode != config.OutputFollow {
+		a.cOutputMode = config.OutputFixed
+	}
 	a.cDevice.SetText(c.OutputDevice)
 	a.cPixFmt.SetText(c.PixFmt)
 	a.cExtra.SetText(c.ExtraArgs)
@@ -228,6 +246,9 @@ func (a *App) assemble() config.Config {
 			ExtraArgs:     a.cExtra.Text(),
 			RestoreAspect: a.cRestore.Value,
 			TargetAspect:  config.TargetAspects[a.cTargetIdx],
+			OutputMode:    a.cOutputMode,
+			CamWidth:      atoi(a.cCamW.Text()),
+			CamHeight:     atoi(a.cCamH.Text()),
 		},
 	}
 }
@@ -262,6 +283,103 @@ func (a *App) startHost() {
 	}
 	if err := a.hostRunner.Start(a.ffmpegBin, ffmpeg.HostArgs(cfg.Host)); err != nil {
 		a.status = "Host: " + err.Error()
+		return
+	}
+	a.hostApplied = cfg.Host // 自動貼り直しの基準として記録
+	a.hostDirtySince = time.Time{}
+}
+
+// hostReapplyDebounce は稼働中のホスト設定変更を貼り直すまでの待ち。
+// 入力途中（"1"→"10"→"108"…）で毎回再起動しないための間（ま）。
+const hostReapplyDebounce = 700 * time.Millisecond
+
+// maybeReapplyHost は稼働中にホスト設定が変わっていれば、デバウンス後に送出を貼り直す。
+// 解像度・FPS・ビットレート等の変更を、停止ボタンを押さずに即（ほぼ即）反映する。
+func (a *App) maybeReapplyHost(gtx C) {
+	if !a.hostRunner.Running() {
+		a.hostDirtySince = time.Time{}
+		return
+	}
+	cur := a.assemble().Host
+	if cur == a.hostApplied {
+		a.hostDirtySince = time.Time{}
+		return
+	}
+	if cur.Validate() != "" {
+		return // 入力途中の無効値（空欄=0 等）では貼り直さない
+	}
+	now := gtx.Now
+	if a.hostDirtySince.IsZero() {
+		a.hostDirtySince = now
+	}
+	if now.Sub(a.hostDirtySince) < hostReapplyDebounce {
+		// デバウンス満了時に再評価できるよう、将来のフレームを予約する。
+		gtx.Execute(op.InvalidateCmd{At: a.hostDirtySince.Add(hostReapplyDebounce)})
+		return
+	}
+	// 実際の貼り直し（Stop→待ち→Start）は時間がかかるため、UI スレッドを止めない
+	// 直列ワーカーへ依頼する。基準は楽観的に即更新し、連打を1件へ畳み込む。
+	a.hostApplied = cur
+	a.hostDirtySince = time.Time{}
+	a.requestHostRestart(cur)
+	a.status = fmt.Sprintf("Host: 設定変更を反映中…（%dx%d fps=%d）", cur.Width, cur.Height, cur.FPS)
+}
+
+// requestHostRestart は貼り直しワーカーへ最新設定を1件渡す（古い保留は捨てて畳み込む）。
+func (a *App) requestHostRestart(h config.HostConfig) {
+	for {
+		select {
+		case a.hostRestart <- h:
+			return
+		default:
+			select { // 保留中の古い依頼を1件捨ててから入れ直す
+			case <-a.hostRestart:
+			default:
+			}
+		}
+	}
+}
+
+// hostRestartWorker は貼り直し依頼を直列に処理する。UI スレッドとは別 goroutine で動き、
+// 触れるのは並行安全な hostRunner と読み取り専用の ffmpegBin/win のみ（App 状態は触らない）。
+func (a *App) hostRestartWorker() {
+	for h := range a.hostRestart {
+		a.hostRunner.Stop()
+		for i := 0; i < 200 && a.hostRunner.Running(); i++ {
+			time.Sleep(20 * time.Millisecond)
+		}
+		err := a.hostRunner.Start(a.ffmpegBin, ffmpeg.HostArgs(h))
+		// 結果を UI スレッドへ通知（status 更新・失敗時の再評価は UI 側で行う）。
+		select {
+		case a.hostRestartDone <- err:
+		default: // 前の結果が未処理なら最新で上書き
+			select {
+			case <-a.hostRestartDone:
+			default:
+			}
+			select {
+			case a.hostRestartDone <- err:
+			default:
+			}
+		}
+		if a.win != nil {
+			a.win.Invalidate()
+		}
+	}
+}
+
+// drainHostRestartResult は貼り直しワーカーの結果を UI スレッドで取り込む。
+// 失敗時は hostApplied をリセットして maybeReapplyHost に再試行させる。
+func (a *App) drainHostRestartResult() {
+	select {
+	case err := <-a.hostRestartDone:
+		if err != nil {
+			a.status = "Host(自動反映)失敗: " + err.Error()
+			a.hostApplied = config.HostConfig{} // 反映できていないので再評価＝再試行させる
+		} else {
+			a.status = "Host: 設定変更を反映しました"
+		}
+	default:
 	}
 }
 
@@ -346,18 +464,22 @@ func (a *App) startClient() {
 			cfg.Client.ListenPort, cfg.Client.ListenPort)
 		return
 	}
-	if err := a.clientRunner.Start(a.ffmpegBin, ffmpeg.ClientArgs(cfg.Client)); err != nil {
+	live := ffmpeg.ClientArgs(cfg.Client)
+	ph := ffmpeg.ClientPlaceholderArgs(cfg.Client)
+	if err := a.clientSup.Start(a.ffmpegBin, live, ph, cfg.Client.ListenPort); err != nil {
 		a.status = "Client: " + err.Error()
 		return
 	}
-	a.status = "Client: 受信開始。この後 Discord を開き、カメラ「MacScreen」を選択してください。"
+	a.status = "Client: 待機映像で仮想カメラを起動しました。Discord でカメラ「MacScreen」を選択（いつ開いてもOK）。ホスト送出を検出すると自動で切り替わります。"
 }
 
 // Run はウィンドウのイベントループを回す。
 func (a *App) Run(w *app.Window) error {
 	a.win = w
 	a.hostRunner.OnUpdate = w.Invalidate
-	a.clientRunner.OnUpdate = w.Invalidate
+	a.clientSup.OnUpdate = w.Invalidate
+	a.clientSup.OnState = func(string) { w.Invalidate() }
+	go a.hostRestartWorker() // 稼働中ホスト設定変更の貼り直しを直列処理
 	var ops op.Ops
 	for {
 		switch e := w.Event().(type) {
@@ -379,11 +501,11 @@ func (a *App) Shutdown() {
 	a.hostPreview.Stop()
 	a.clientPreview.Stop()
 	a.hostRunner.Stop()
-	a.clientRunner.Stop()
+	a.clientSup.Stop() // 同期的に内部 ffmpeg の停止まで待つ
 	// Stop は SIGINT→2秒後 SIGKILL でエスカレートする。最大 4 秒待って確実に落とす。
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		if !a.hostRunner.Running() && !a.clientRunner.Running() {
+		if !a.hostRunner.Running() && !a.clientSup.Running() {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
@@ -412,6 +534,13 @@ func (a *App) handleEvents(gtx C) {
 	if a.cTargetBtn.Clicked(gtx) {
 		a.cTargetIdx = (a.cTargetIdx + 1) % len(config.TargetAspects)
 	}
+	if a.cModeBtn.Clicked(gtx) {
+		if a.cOutputMode == config.OutputFollow {
+			a.cOutputMode = config.OutputFixed
+		} else {
+			a.cOutputMode = config.OutputFollow
+		}
+	}
 	if a.hEncBtn.Clicked(gtx) && len(a.hEncoders) > 0 {
 		a.hEncIdx = (a.hEncIdx + 1) % len(a.hEncoders)
 	}
@@ -428,10 +557,10 @@ func (a *App) handleEvents(gtx C) {
 		a.startClient()
 	}
 	if a.cStop.Clicked(gtx) {
-		a.clientRunner.Stop()
+		a.clientSup.Stop()
 	}
 	if a.cClear.Clicked(gtx) {
-		a.clientRunner.Clear()
+		a.clientSup.Clear()
 	}
 	// 短絡評価で Clicked のイベント消費が漏れないよう個別に評価する。
 	r1 := a.hRecheck.Clicked(gtx)
@@ -457,6 +586,10 @@ func (a *App) handleEvents(gtx C) {
 		}
 		a.refreshDeps()
 	}
+
+	// 稼働中にホスト設定を変えたら（デバウンス後に）自動で送出を貼り直す。
+	a.maybeReapplyHost(gtx)
+	a.drainHostRestartResult()
 }
 
 func (a *App) layout(gtx C) D {
@@ -494,8 +627,8 @@ func (a *App) runState() string {
 		h = "● 配信中"
 	}
 	c := "停止"
-	if a.clientRunner.Running() {
-		c = "● 受信中"
+	if a.clientSup.Running() {
+		c = "● " + a.clientSup.State() // 待機/ライブ
 	}
 	return "Host: " + h + "   Client: " + c
 }
@@ -592,7 +725,8 @@ func (a *App) hostTab(gtx C) D {
 
 func (a *App) clientTab(gtx C) D {
 	ready := a.clientDeps.OK()
-	running := a.clientRunner.Running()
+	running := a.clientSup.Running()
+	fixed := a.cOutputMode != config.OutputFollow
 
 	clientBanner := a.warnIfNotReady(ready, &a.cGotoSetup)
 	if runtime.GOOS != "linux" {
@@ -605,6 +739,26 @@ func (a *App) clientTab(gtx C) D {
 		layout.Rigid(a.field("バッファ(fifo_size)", &a.cFifo)),
 		layout.Rigid(a.field("FPS(仮想カメラ提示 / 0=ソースのまま)", &a.cFPS)),
 		layout.Rigid(a.hint("ホストの FPS に合わせる。固定 fps で提示するとDiscord の高 fps GoLive（例 1080p60）でのクラッシュを避けられる。")),
+		layout.Rigid(func(gtx C) D {
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(a.labelCell("出力モード")),
+				layout.Rigid(func(gtx C) D {
+					return material.Button(a.th, &a.cModeBtn, outputModeLabel(a.cOutputMode)).Layout(gtx)
+				}),
+			)
+		}),
+		layout.Rigid(a.hint(outputModeHint(fixed))),
+		layout.Rigid(func(gtx C) D {
+			if !fixed {
+				return D{} // follow ではカメラ解像度はホスト追従なので入力不要
+			}
+			return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+				layout.Rigid(a.labelCell("カメラ解像度")),
+				layout.Rigid(func(gtx C) D { return a.boxedEditor(&a.cCamW)(gtx) }),
+				layout.Rigid(a.labelCell(" × ")),
+				layout.Rigid(func(gtx C) D { return a.boxedEditor(&a.cCamH)(gtx) }),
+			)
+		}),
 		layout.Rigid(a.field("出力デバイス", &a.cDevice)),
 		layout.Rigid(a.field("ピクセル形式", &a.cPixFmt)),
 		layout.Rigid(func(gtx C) D {
@@ -640,7 +794,7 @@ func (a *App) clientTab(gtx C) D {
 		layout.Rigid(a.controlRow(&a.cStart, &a.cStop, &a.cClear, &a.cRecheck, ready, running)),
 		layout.Rigid(spacer(4)),
 		layout.Rigid(material.Body2(a.th, "ログ:").Layout),
-		layout.Flexed(1, a.logBox(&a.cLog, a.clientRunner.Lines())),
+		layout.Flexed(1, a.logBox(&a.cLog, a.clientSup.Lines())),
 	)
 }
 
@@ -852,7 +1006,14 @@ func (a *App) anamorphicHint() string {
 // 該当時のみ知らせる。
 func (a *App) clientFilterHint() string {
 	c := a.assemble().Client
-	if (c.RestoreAspect || c.TargetAspect != "") && ffmpeg.HasVideoFilter(c.ExtraArgs) {
+	hasVF := ffmpeg.HasVideoFilter(c.ExtraArgs)
+	if c.OutputMode == config.OutputFixed {
+		if hasVF {
+			return "※ 固定モードでは追加引数の -vf は固定枠フィルタの前段へ合成されます（固定枠は常に適用）。"
+		}
+		return ""
+	}
+	if (c.RestoreAspect || c.TargetAspect != "") && hasVF {
 		return "※ 追加引数に -vf があるため、アスペクト復元・目標比率は適用されません（追加引数を優先）。"
 	}
 	return ""
@@ -875,6 +1036,20 @@ func targetAspectLabel(idx int) string {
 		v = "なし"
 	}
 	return fmt.Sprintf("(%d/%d) %s ▸", idx+1, len(config.TargetAspects), v)
+}
+
+func outputModeLabel(mode string) string {
+	if mode == config.OutputFollow {
+		return "follow（ホスト追従）▸"
+	}
+	return "fixed（固定スケール）▸"
+}
+
+func outputModeHint(fixed bool) string {
+	if fixed {
+		return "固定: 受信映像をカメラ解像度へスケール/黒帯。ホスト解像度が変わっても・再接続しても落ちない（推奨）。"
+	}
+	return "follow: ホスト解像度に追従。カメラ=ホスト解像度だが、変更/再接続のたびに Discord がカメラを開き直す（不安定になりうる）。"
 }
 
 func setIfChanged(ed *widget.Editor, cache *string, val string) {
