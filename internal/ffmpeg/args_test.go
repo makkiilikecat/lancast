@@ -92,6 +92,50 @@ func TestClientArgs(t *testing.T) {
 	}
 }
 
+func TestClientArgs_FPSSetsCFR(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client
+	c.FPS = 60
+	got := argStr(ClientArgs(c))
+	// CFR 化（-vf 内 fps）と出力レート固定（-r）の両方が付く。
+	for _, want := range []string{"fps=60", "-r 60", "-f v4l2 /dev/video10"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("期待する引数 %q が無い: %s", want, got)
+		}
+	}
+	// fps フィルタは出力指定より前（フィルタ鎖は -vf 側）に置かれること。
+	if strings.Index(got, "fps=60") > strings.Index(got, "-f v4l2") {
+		t.Errorf("fps フィルタは出力指定より前にあるべき: %s", got)
+	}
+}
+
+func TestClientArgs_FPSZeroNoRate(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client
+	c.FPS = 0
+	c.RestoreAspect = false
+	c.TargetAspect = ""
+	got := argStr(ClientArgs(c))
+	if strings.Contains(got, "-r ") || strings.Contains(got, "fps=") {
+		t.Errorf("FPS=0(ソースのまま)では fps/-r を付けない: %s", got)
+	}
+}
+
+func TestClientArgs_FPSWithUserVF_RateStillForced(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Client
+	c.FPS = 60
+	c.ExtraArgs = "-vf hflip"
+	got := argStr(ClientArgs(c))
+	// ユーザー -vf 優先で本機能の fps フィルタは付けないが、-r は独立して付く。
+	if strings.Contains(got, "fps=60") {
+		t.Errorf("ユーザー -vf がある場合は fps フィルタを付けない: %s", got)
+	}
+	if !strings.Contains(got, "-r 60") {
+		t.Errorf("ユーザー -vf があっても出力 -r は固定する: %s", got)
+	}
+	if strings.Count(got, "-vf") != 1 {
+		t.Errorf("-vf が二重指定になっている: %s", got)
+	}
+}
+
 func TestClientArgs_LowDelayOff(t *testing.T) {
 	c := config.DefaultConfigFor("linux").Client
 	c.LowDelay = false
@@ -123,7 +167,7 @@ func TestPresetWidth(t *testing.T) {
 
 func TestHostArgs_Anamorphic_SetsDAR(t *testing.T) {
 	c := config.DefaultConfigFor("darwin").Host
-	c.Width, c.Height = 1280, 720 // 16:9
+	c.Width, c.Height = 1280, 720   // 16:9
 	c.DARNum, c.DARDen = 1920, 1200 // 実画面 16:10
 	got := argStr(HostArgs(c))
 	if !strings.Contains(got, "setdar=1920/1200") {
@@ -174,8 +218,9 @@ func TestClientArgs_NoVFWhenDisabled(t *testing.T) {
 	c := config.DefaultConfigFor("linux").Client
 	c.RestoreAspect = false
 	c.TargetAspect = ""
+	c.FPS = 0 // fps 正規化も無効なら無加工
 	if strings.Contains(argStr(ClientArgs(c)), "-vf") {
-		t.Errorf("復元も目標比率も無効なら -vf は付けない（従来挙動）")
+		t.Errorf("復元も目標比率も fps 正規化も無効なら -vf は付けない（従来挙動）")
 	}
 }
 

@@ -36,7 +36,7 @@ func main() {
 		source  = flag.String("source", "", "キャプチャ `入力` (host) 例 3:none, :0.0")
 		encoder = flag.String("encoder", "", "`エンコーダ` (host) 例 hevc_videotoolbox")
 		bitrate = flag.Int("bitrate", 0, "ビットレート `kbps` (host)")
-		fps     = flag.Int("fps", 0, "`FPS` (host)")
+		fps     = flag.Int("fps", 0, "`FPS` (host=送出 / client=仮想カメラ提示)")
 		size    = flag.String("size", "", "解像度 `WxH` (host) 例 1280x720")
 		fifo    = flag.Int("fifo", 0, "受信バッファ `fifo_size` (client)")
 		extra   = flag.String("extra", "", "ffmpeg 追加 `引数`")
@@ -124,11 +124,11 @@ Host(送信) 上書き:
   -dest IP -port N -source SPEC -encoder NAME -bitrate KBPS -fps N -size WxH
 
 Client(受信) 上書き:
-  -port N -device PATH -fifo N
+  -port N -device PATH -fifo N -fps N（仮想カメラへ提示する固定 fps / 0=ソースのまま）
 
 省略時は保存済み設定、無ければ既定値を使用。
   現在の既定値(host):   size=`+fmt.Sprintf("%dx%d fps=%d bitrate=%dk encoder=%s", d.Host.Width, d.Host.Height, d.Host.FPS, d.Host.Bitrate, d.Host.Encoder)+`
-  現在の既定値(client): port=`+fmt.Sprintf("%d device=%s", d.Client.ListenPort, d.Client.OutputDevice)+`
+  現在の既定値(client): port=`+fmt.Sprintf("%d device=%s fps=%d", d.Client.ListenPort, d.Client.OutputDevice, d.Client.FPS)+`
 `)
 }
 
@@ -160,6 +160,7 @@ func applyOverrides(cfg *config.Config, o overrides) {
 	}
 	if o.fps > 0 {
 		cfg.Host.FPS = o.fps
+		cfg.Client.FPS = o.fps // client モードでは仮想カメラの提示 fps を指定
 	}
 	if w, h, ok := parseSize(o.size); ok {
 		cfg.Host.Width, cfg.Host.Height = w, h

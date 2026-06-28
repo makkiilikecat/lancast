@@ -190,6 +190,13 @@ func ClientArgs(c config.ClientConfig) []string {
 		args = append(args, "-vf", vf)
 	}
 
+	// 仮想カメラへ N fps の CFR で提示する。-r は出力レートを固定し、フレーム
+	// 到達タイミングを安定させる（不定 framerate による Discord クラッシュ回避）。
+	// 0 は無指定＝送信ストリーム任せ（従来挙動）。
+	if c.FPS > 0 {
+		args = append(args, "-r", strconv.Itoa(c.FPS))
+	}
+
 	args = append(args, "-pix_fmt", c.PixFmt, "-f", "v4l2", c.OutputDevice)
 	return args
 }
@@ -214,6 +221,12 @@ func hasVideoFilter(args []string) bool {
 // どちらも不要なら空（無加工＝従来挙動）。
 func clientVF(c config.ClientConfig) string {
 	var f []string
+	if c.FPS > 0 {
+		// フレームを N fps へ正規化（重複/間引き）し、CFR で仮想カメラへ渡す。
+		// -r だけでなくフィルタ側でも整えることで、可変フレームレート入力でも
+		// 仮想カメラへの到達タイミングが一定になり、消費側の負荷予測が安定する。
+		f = append(f, "fps="+strconv.Itoa(c.FPS))
+	}
 	if c.RestoreAspect {
 		// 受信 SAR を反映して実比率の幅へ伸長し、以後は正方ピクセルとして扱う。
 		f = append(f, "scale='trunc(iw*sar/2)*2':ih", "setsar=1")

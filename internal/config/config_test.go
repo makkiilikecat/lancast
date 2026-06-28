@@ -25,6 +25,10 @@ func TestDefaultConfigFor(t *testing.T) {
 	if mac.Client.OutputDevice != "/dev/video10" || mac.Client.ListenPort != 5004 {
 		t.Errorf("client 既定値が不正: %+v", mac.Client)
 	}
+	// 仮想カメラの既定提示 fps はホスト既定 fps に一致する（不定 framerate を避ける）。
+	if mac.Client.FPS != mac.Host.FPS {
+		t.Errorf("client 既定 FPS=%d は host 既定 FPS=%d に一致すべき", mac.Client.FPS, mac.Host.FPS)
+	}
 }
 
 func TestSaveLoadRoundTrip(t *testing.T) {
@@ -91,6 +95,16 @@ func TestClientValidate(t *testing.T) {
 	bad.ListenPort = 0
 	if bad.Validate() == "" {
 		t.Error("ポート0 が検出されない")
+	}
+	bad = ok
+	bad.FPS = -1
+	if bad.Validate() == "" {
+		t.Error("負の FPS が検出されない")
+	}
+	good := ok
+	good.FPS = 0 // 0=ソースのまま は許容
+	if good.Validate() != "" {
+		t.Error("FPS=0(ソースのまま) は許容されるべき")
 	}
 }
 

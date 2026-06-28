@@ -68,16 +68,16 @@ type App struct {
 	hLog                                   widget.List
 
 	// Client 入力。
-	cPort, cFifo, cDevice, cPixFmt, cExtra widget.Editor
-	cLowDelay                              widget.Bool
-	cStart, cStop, cClear, cRecheck        widget.Clickable
-	cPrev                                  widget.Editor
-	cPrevCache                             string
-	cPreviewOn                             widget.Bool
-	cRestore                               widget.Bool
-	cTargetBtn                             widget.Clickable
-	cTargetIdx                             int
-	cLog                                   widget.List
+	cPort, cFifo, cFPS, cDevice, cPixFmt, cExtra widget.Editor
+	cLowDelay                                    widget.Bool
+	cStart, cStop, cClear, cRecheck              widget.Clickable
+	cPrev                                        widget.Editor
+	cPrevCache                                   string
+	cPreviewOn                                   widget.Bool
+	cRestore                                     widget.Bool
+	cTargetBtn                                   widget.Clickable
+	cTargetIdx                                   int
+	cLog                                         widget.List
 
 	setupRecheck           widget.Clickable
 	hGotoSetup, cGotoSetup widget.Clickable
@@ -128,7 +128,7 @@ func NewApp() *App {
 	a.cLog.Axis = layout.Vertical
 	a.cLog.ScrollToEnd = true
 
-	for _, e := range []*widget.Editor{&a.hWidth, &a.hHeight, &a.hFPS, &a.hBitrate, &a.hPort, &a.cPort, &a.cFifo} {
+	for _, e := range []*widget.Editor{&a.hWidth, &a.hHeight, &a.hFPS, &a.hBitrate, &a.hPort, &a.cPort, &a.cFifo, &a.cFPS} {
 		e.SingleLine = true
 		e.Filter = "0123456789"
 	}
@@ -177,6 +177,7 @@ func (a *App) loadFromConfig(cfg config.Config) {
 	c := cfg.Client
 	a.cPort.SetText(strconv.Itoa(c.ListenPort))
 	a.cFifo.SetText(strconv.Itoa(c.FifoSize))
+	a.cFPS.SetText(strconv.Itoa(c.FPS))
 	a.cDevice.SetText(c.OutputDevice)
 	a.cPixFmt.SetText(c.PixFmt)
 	a.cExtra.SetText(c.ExtraArgs)
@@ -222,6 +223,7 @@ func (a *App) assemble() config.Config {
 			OutputDevice:  a.cDevice.Text(),
 			PixFmt:        a.cPixFmt.Text(),
 			FifoSize:      atoi(a.cFifo.Text()),
+			FPS:           atoi(a.cFPS.Text()),
 			LowDelay:      a.cLowDelay.Value,
 			ExtraArgs:     a.cExtra.Text(),
 			RestoreAspect: a.cRestore.Value,
@@ -601,6 +603,8 @@ func (a *App) clientTab(gtx C) D {
 		layout.Rigid(clientBanner),
 		layout.Rigid(a.field("受信ポート", &a.cPort)),
 		layout.Rigid(a.field("バッファ(fifo_size)", &a.cFifo)),
+		layout.Rigid(a.field("FPS(仮想カメラ提示 / 0=ソースのまま)", &a.cFPS)),
+		layout.Rigid(a.hint("ホストの FPS に合わせる。固定 fps で提示するとDiscord の高 fps GoLive（例 1080p60）でのクラッシュを避けられる。")),
 		layout.Rigid(a.field("出力デバイス", &a.cDevice)),
 		layout.Rigid(a.field("ピクセル形式", &a.cPixFmt)),
 		layout.Rigid(func(gtx C) D {

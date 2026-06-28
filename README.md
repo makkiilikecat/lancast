@@ -53,6 +53,7 @@ sudo modprobe v4l2loopback devices=1 video_nr=10 card_label=MacScreen exclusive_
 | Discord のカメラ一覧に「MacScreen」が出ない | **受信(Client)を先に開始**してから Discord を開く（`exclusive_caps=1` のため writer 接続後にのみ Capture 化）。出ない場合は `sudo modprobe -r v4l2loopback` 後に `exclusive_caps` を付け外しして再ロード。Discord 再起動も有効 |
 | `VIDIOC_G_FMT: Invalid argument`（受信側） | apt 版 v4l2loopback 0.12.x が kernel 6.17 と非互換。git 版 0.15+ を DKMS 導入 |
 | `Address already in use`（受信側） | 前回の ffmpeg がポートを掴んだまま。`lsof -iUDP:5004` で確認し残プロセスを終了（`pkill -f 'ffmpeg.*5004'`） |
+| Discord で 1080p 60fps GoLive を開始すると落ちる | 仮想カメラの提示フレームレートが不定だと Chromium のキャプチャ経路が高 fps で破綻し得る。Client タブの **FPS** をホストの FPS に合わせて固定し（`0=ソースのまま`、CLI は `-fps`）CFR で提示する。ホスト 60fps なら Client も 60 にする |
 | Mac で黒画面/`Configuration of video device failed` | 画面収録の許可が未設定。手順3の許可後にアプリ再起動 |
 | ffmpeg が「見つかりません」 | `brew install ffmpeg`（mac）/ `sudo apt install ffmpeg`（Linux）。GUI 版は Homebrew パスも自動探索する |
 
@@ -95,7 +96,8 @@ lancast -host -dest 192.168.0.215 -port 5004 -debug
 | `-port` | 両方 | ポート（host=送信先 / client=受信） |
 | `-source` | host | キャプチャ入力（例 `3:none`, `:0.0`） |
 | `-encoder` | host | エンコーダ |
-| `-bitrate` / `-fps` / `-size` | host | ビットレート kbps / FPS / `1280x720` |
+| `-bitrate` / `-size` | host | ビットレート kbps / 解像度 `1280x720` |
+| `-fps` | 両方 | host=送出 FPS / client=仮想カメラへ提示する固定 FPS（`0`=ソースのまま） |
 | `-device` | client | 出力デバイス（例 `/dev/video10`） |
 | `-fifo` | client | 受信バッファ |
 | `-extra` | 両方 | ffmpeg 追加引数 |

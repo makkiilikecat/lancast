@@ -38,6 +38,14 @@ type ClientConfig struct {
 	LowDelay     bool   `json:"low_delay"`     // nobuffer + low_delay
 	ExtraArgs    string `json:"extra_args"`
 
+	// FPS は仮想カメラへ提示する固定フレームレート。送信ストリームを N fps の
+	// CFR（固定フレームレート）に正規化してから v4l2loopback へ流すことで、
+	// 仮想カメラが安定した framerate を提示し、Discord/Chromium が高解像度・高 fps
+	// （例: 1080p 60fps GoLive）でカメラを開いてもタイミング計算が破綻せずクラッシュを避ける。
+	// ホストの FPS に合わせるのが基本（ホスト 60 なら 60 で真の 60fps を出せる）。
+	// 0 は「ソースのまま（無加工 = 従来挙動）」で、フレームレートは送信ストリーム任せ。
+	FPS int `json:"fps"`
+
 	// RestoreAspect は受信ストリームの SAR（送信側が埋めた実画面比）を読み、
 	// 正方ピクセルの実比率へ伸長し直してから仮想カメラへ流す。
 	RestoreAspect bool `json:"restore_aspect"`
@@ -94,6 +102,9 @@ func DefaultConfigFor(goos string) Config {
 		FifoSize:      1000000,
 		LowDelay:      true,
 		RestoreAspect: true,
+		// 既定はホスト既定 FPS に合わせ、仮想カメラへ固定 fps で提示する
+		// （無指定の不定 framerate による Discord クラッシュを既定で避ける）。
+		FPS: host.FPS,
 	}
 	return Config{Host: host, Client: client}
 }
@@ -144,6 +155,8 @@ func (c ClientConfig) Validate() string {
 		return "出力デバイスを入力してください"
 	case c.PixFmt == "":
 		return "ピクセル形式を入力してください"
+	case c.FPS < 0:
+		return "FPS は 0(ソースのまま) 以上で指定してください"
 	case !validTargetAspect(c.TargetAspect):
 		return "目標比率の指定が不正です"
 	}
