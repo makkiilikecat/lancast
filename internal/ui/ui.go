@@ -225,6 +225,9 @@ func (a *App) assemble() config.Config {
 			DestPort:      atoi(a.hPort.Text()),
 			ExtraArgs:     a.hExtra.Text(),
 			TargetAspect:  config.TargetAspects[a.hTargetIdx],
+			// 検出した画面解像度を渡す（永続化されない）。黒帯不要時の純 GPU 経路判定に使う。
+			ScreenW: a.screenW,
+			ScreenH: a.screenH,
 		},
 		Client: config.ClientConfig{
 			ListenPort:   atoi(a.cPort.Text()),
@@ -678,7 +681,7 @@ func (a *App) hostTab(gtx C) D {
 				layout.Flexed(1, a.boxedEditor(&a.hHeight)),
 			)
 		}),
-		layout.Rigid(a.hint("送出は 幅×高さ をそのまま使用（受信側は無加工）。")),
+		layout.Rigid(a.hint("出力は 幅×高さ ちょうど。キャプチャはアスペクト比を保って縮小し余白は黒帯（歪み無し）。比が一致すれば黒帯ゼロ。")),
 		layout.Rigid(a.field("FPS", &a.hFPS)),
 		layout.Rigid(a.field("ビットレート(kbps)", &a.hBitrate)),
 		layout.Rigid(func(gtx C) D {

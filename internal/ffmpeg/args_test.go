@@ -31,31 +31,39 @@ func TestHostArgs_AVFoundation_NoFramerateAtInput(t *testing.T) {
 }
 
 func TestHostArgs_VideotoolboxUsesGPUScale(t *testing.T) {
-	// avfoundation×VideoToolbox では GPU スケール経路（nv12 直取り + hwupload + scale_vt）。
+	// avfoundation×VideoToolbox では GPU 縮小経路（nv12 直取り + hwupload + scale_vt）。
+	// 縮小はアスペクト比保持（decrease 相当の式）で行い、pad は hwdownload 後に CPU で行う。
 	c := config.DefaultConfigFor("darwin").Host
 	got := argStr(HostArgs(c))
 	for _, want := range []string{
 		"-init_hw_device videotoolbox",
 		"-f avfoundation -pixel_format nv12",
-		"-vf fps=30,hwupload,scale_vt=1280:720",
+		"-vf fps=30,hwupload,scale_vt=",
+		"hwdownload,format=nv12,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black",
 	} {
 		if !strings.Contains(got, want) {
-			t.Errorf("GPU スケール経路に期待する引数 %q が無い: %s", want, got)
+			t.Errorf("GPU 縮小経路に期待する引数 %q が無い: %s", want, got)
 		}
 	}
-	// CPU の swscale 経路（scale=W:H,fps）は出てはならない。
-	if strings.Contains(got, "scale=1280:720,fps=30") {
+	// アスペクト比保持＋拡大抑止の式（min(1, min(w/iw, h/ih))）が入っていること。
+	if !strings.Contains(got, `min(1\,min(1280/iw`) {
+		t.Errorf("GPU 経路にアスペクト保持＋拡大抑止の縮小式が無い: %s", got)
+	}
+	// CPU の swscale 経路（scale=W:H...）は出てはならない。
+	if strings.Contains(got, "scale=1280:720") {
 		t.Errorf("VideoToolbox なのに CPU swscale 経路が混入: %s", got)
 	}
 }
 
 func TestHostArgs_SoftwareEncoderKeepsCPUScale(t *testing.T) {
-	// libx264 等のソフトエンコーダでは GPU 往復は無意味なため従来の CPU スケールを維持する。
+	// libx264 等のソフトエンコーダでは GPU 往復は無意味なため CPU の fit+pad 経路を使う。
 	c := config.DefaultConfigFor("darwin").Host
 	c.Encoder = "libx264"
 	got := argStr(HostArgs(c))
-	if !strings.Contains(got, "-vf scale=1280:720,fps=30") {
-		t.Errorf("ソフトエンコーダで CPU スケール経路が無い: %s", got)
+	want := "-vf scale=1280:720:force_original_aspect_ratio=decrease:force_divisible_by=2," +
+		"pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black,fps=30"
+	if !strings.Contains(got, want) {
+		t.Errorf("ソフトエンコーダで CPU fit+pad 経路が無い: %s", got)
 	}
 	for _, ng := range []string{"-init_hw_device", "hwupload", "scale_vt", "-pixel_format"} {
 		if strings.Contains(got, ng) {
@@ -207,6 +215,101 @@ func TestHostArgs_NoSetDAR(t *testing.T) {
 	cl := config.DefaultConfigFor("linux").Host // libx264 (CPU 経路)
 	if strings.Contains(argStr(HostArgs(cl)), "setdar") {
 		t.Errorf("CPU 経路でも setdar は付けない")
+	}
+}
+
+func TestHostArgs_FitPadLetterbox(t *testing.T) {
+	// 出力は常に Width×Height ちょうどで、引き伸ばし（scale=W:H 単独）は使わない。
+	// CPU・GPU いずれも decrease で縮小し pad で枠へ収める（歪み無し）。
+	cpu := config.DefaultConfigFor("linux").Host // libx264 = CPU 経路
+	cpu.Width, cpu.Height = 1920, 1080
+	got := argStr(HostArgs(cpu))
+	if !strings.Contains(got, "force_original_aspect_ratio=decrease") {
+		t.Errorf("CPU 経路で decrease 縮小が無い: %s", got)
+	}
+	if !strings.Contains(got, "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black") {
+		t.Errorf("CPU 経路で pad 枠が 1920x1080 でない: %s", got)
+	}
+	// 引き伸ばし（アスペクト無視の scale=W:H,fps）は残っていないこと。
+	if strings.Contains(got, "scale=1920:1080,fps") {
+		t.Errorf("引き伸ばし経路が残存: %s", got)
+	}
+
+	gpu := config.DefaultConfigFor("darwin").Host // hevc_videotoolbox = GPU 経路
+	gpu.Width, gpu.Height = 1920, 1080
+	gg := argStr(HostArgs(gpu))
+	if !strings.Contains(gg, "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black") {
+		t.Errorf("GPU 経路で pad 枠が 1920x1080 でない: %s", gg)
+	}
+	if strings.Contains(gg, "scale_vt=1920:1080") {
+		t.Errorf("GPU 経路に引き伸ばし scale_vt=W:H が残存: %s", gg)
+	}
+}
+
+func TestHostArgs_NoBarsUsesZeroCopyGPU(t *testing.T) {
+	// 画面比＝出力枠比なら黒帯不要 → pad を省いた純 GPU ゼロコピー経路（hwdownload なし）。
+	c := config.DefaultConfigFor("darwin").Host // hevc_videotoolbox
+	c.Width, c.Height = 1280, 720
+	c.ScreenW, c.ScreenH = 2560, 1440 // 16:9 = 出力枠比と一致
+	got := argStr(HostArgs(c))
+	if !strings.Contains(got, "-vf fps=30,hwupload,scale_vt=1280:720") {
+		t.Errorf("黒帯不要時に純 GPU 経路でない: %s", got)
+	}
+	for _, ng := range []string{"hwdownload", "pad=", "force_original_aspect_ratio"} {
+		if strings.Contains(got, ng) {
+			t.Errorf("黒帯不要なのに pad 経路 %q が混入: %s", ng, got)
+		}
+	}
+}
+
+func TestHostArgs_NoBarsUsesPlainCPUScale(t *testing.T) {
+	c := config.DefaultConfigFor("linux").Host // libx264 = CPU 経路
+	c.Width, c.Height = 1280, 720
+	c.ScreenW, c.ScreenH = 1920, 1080 // 16:9 一致
+	got := argStr(HostArgs(c))
+	if !strings.Contains(got, "-vf scale=1280:720,fps=30") {
+		t.Errorf("黒帯不要時に素の CPU スケールでない: %s", got)
+	}
+	if strings.Contains(got, "pad=") {
+		t.Errorf("黒帯不要なのに pad が混入: %s", got)
+	}
+}
+
+func TestHostArgs_MismatchedAspectKeepsPad(t *testing.T) {
+	// 16:10 画面 → 16:9 枠（約 11% 差）は黒帯必須。許容誤差を超えるので fit+pad のまま。
+	c := config.DefaultConfigFor("darwin").Host
+	c.Width, c.Height = 1280, 720 // 16:9
+	c.ScreenW, c.ScreenH = 1920, 1200 // 16:10
+	got := argStr(HostArgs(c))
+	if !strings.Contains(got, "hwdownload,format=nv12,pad=1280:720:(ow-iw)/2:(oh-ih)/2:color=black") {
+		t.Errorf("比不一致なのに pad 経路でない: %s", got)
+	}
+	// CPU 側も同様。
+	cl := config.DefaultConfigFor("linux").Host
+	cl.Width, cl.Height = 1280, 720
+	cl.ScreenW, cl.ScreenH = 1920, 1200
+	if !strings.Contains(argStr(HostArgs(cl)), "force_original_aspect_ratio=decrease") {
+		t.Errorf("CPU 側で比不一致なのに fit+pad でない")
+	}
+}
+
+func TestNoBars_RoundingTolerance(t *testing.T) {
+	// 16 整列の丸め誤差（~1%以内）は一致扱い、16:10 vs 16:9 は別物扱い。
+	cases := []struct {
+		sw, sh, w, h int
+		want         bool
+	}{
+		{2560, 1440, 1280, 720, true},  // 完全一致 16:9
+		{3024, 1964, 1664, 1080, true}, // notch Mac, 16整列丸め → 1%未満
+		{1920, 1200, 1920, 1080, false}, // 16:10 → 16:9
+		{1920, 1080, 1440, 1080, false}, // 16:9 → 4:3
+		{0, 0, 1280, 720, false},        // 画面不明は安全側
+	}
+	for _, c := range cases {
+		h := config.HostConfig{ScreenW: c.sw, ScreenH: c.sh, Width: c.w, Height: c.h}
+		if got := noBars(h); got != c.want {
+			t.Errorf("noBars(screen %dx%d, out %dx%d)=%v want %v", c.sw, c.sh, c.w, c.h, got, c.want)
+		}
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 
 	"lancast/internal/config"
 	"lancast/internal/deps"
+	"lancast/internal/display"
 	"lancast/internal/ffmpeg"
 	"lancast/internal/runner"
 )
@@ -39,6 +40,11 @@ func RunHeadless(cfg config.Config, mode Mode, debug bool) int {
 	)
 	switch mode {
 	case ModeHost:
+		// 黒帯不要時の純 GPU ゼロコピー経路判定のため、画面解像度を検出して渡す
+		// （非 mac では取得不可＝0 で、安全側の fit+pad になる）。
+		if w, h, ok := display.MainAspect(); ok {
+			cfg.Host.ScreenW, cfg.Host.ScreenH = w, h
+		}
 		valid = cfg.Host.Validate()
 		res = deps.CheckHost(cfg.Host)
 		args = ffmpeg.HostArgs(cfg.Host)

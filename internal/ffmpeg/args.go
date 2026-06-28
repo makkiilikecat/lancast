@@ -130,16 +130,36 @@ func HostArgs(c config.HostConfig) []string {
 	// CPU 変換を排除し、hwupload→scale_vt で GPU 上でスケールする。
 	gpu := c.Backend == "avfoundation" && usesVideotoolbox(c.Encoder)
 
-	// 映像フィルタ（解像度・FPS 正規化のみ）。送出は Width:Height をそのまま使う
-	// WYSIWYG。アスペクトはユーザーが Width×Height で決め、受信側は無加工で表示する。
-	var vf string
+	// 映像フィルタ。出力は常に Width×Height ちょうど。キャプチャはアスペクト比を保ったまま
+	// その枠へ縮小（decrease）し、余白は黒帯で中央寄せ pad する（レターボックス/ピラーボックス）。
+	// 歪みは出ない。目標比率＝画面比のときは黒帯ゼロで全面表示になる。受信側は無加工で表示する。
+	//
+	// 黒帯が不要（画面比＝出力枠比）と判っているときは、最小リソースのため pad を省く。
+	// 特に GPU 経路では hwdownload/再アップロードを避けてフレームを GPU 上に保つ（ゼロコピー）。
+	withBars := !noBars(c)
+
+	// 入力部（GPU 経路は nv12 直取り + hwupload 用デバイス初期化）。
 	if gpu {
 		args = append(args, "-init_hw_device", "videotoolbox")
 		args = hostInput(args, c, "nv12")
-		// fps を hwupload の前に置き、間引くフレームをアップロードしない。
-		vf = fmt.Sprintf("fps=%d,hwupload,scale_vt=%d:%d", c.FPS, c.Width, c.Height)
 	} else {
 		args = hostInput(args, c, "")
+	}
+
+	// 映像フィルタ。4 経路（GPU/CPU × 黒帯あり/なし）を平坦に選ぶ。
+	// fps を hwupload/縮小の前に置き、間引くフレームを処理しない。
+	var vf string
+	switch {
+	case gpu && withBars:
+		// 重い縮小は GPU(scale_vt)、pad だけ hwdownload 後に CPU で行う
+		// （scale_vt は force_original_aspect_ratio も pad も持たないため）。
+		vf = gpuFitPadVF(c.Width, c.Height, c.FPS)
+	case gpu:
+		// 黒帯不要：フレームを GPU から降ろさず scale_vt のまま encoder へ（ゼロコピー）。
+		vf = fmt.Sprintf("fps=%d,hwupload,scale_vt=%d:%d", c.FPS, c.Width, c.Height)
+	case withBars:
+		vf = cpuFitPadVF(c.Width, c.Height, c.FPS)
+	default:
 		vf = fmt.Sprintf("scale=%d:%d,fps=%d", c.Width, c.Height, c.FPS)
 	}
 	args = append(args, "-vf", vf)
@@ -156,6 +176,50 @@ func HostArgs(c config.HostConfig) []string {
 	// 巨大データグラムによる断片化・欠落を避ける定石値。
 	args = append(args, "-f", "mpegts", fmt.Sprintf("udp://%s:%d?pkt_size=1316", udpHost(c.DestIP), c.DestPort))
 	return args
+}
+
+// noBars は黒帯（pad）が不要＝キャプチャ元の画面比が出力枠 Width:Height と一致する、と
+// 確信できるときだけ true を返す。判定材料（ScreenW/H）が不明なら安全側で false。
+// 16 整列の丸め誤差を許容するため約 1.5% の比差まで「一致」とみなす（16:9 と 16:10 は
+// 約 11% 差なので確実に別物として弾かれる）。前提は「キャプチャ＝メインディスプレイ」。
+func noBars(c config.HostConfig) bool {
+	if c.ScreenW <= 0 || c.ScreenH <= 0 || c.Width <= 0 || c.Height <= 0 {
+		return false
+	}
+	a := c.ScreenW * c.Height // screenW/screenH と W/H の交差積
+	b := c.ScreenH * c.Width
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff*200 <= b*3 // |a-b|/b <= 0.015
+}
+
+// cpuFitPadVF は CPU(swscale)経路の fit+pad フィルタを返す。キャプチャをアスペクト比を
+// 保ったまま w×h 内へ縮小し（force_original_aspect_ratio=decrease）、余白を黒帯で中央寄せ
+// pad する。force_divisible_by=2 は nv12/yuv420p の偶数制約を満たすため。fps は最後に置く。
+func cpuFitPadVF(w, h, fps int) string {
+	return fmt.Sprintf(
+		"scale=%d:%d:force_original_aspect_ratio=decrease:force_divisible_by=2,"+
+			"pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black,fps=%d",
+		w, h, w, h, fps)
+}
+
+// gpuFitPadVF は VideoToolbox 経路の fit+pad フィルタを返す。scale_vt は
+// force_original_aspect_ratio も pad も持たないため、decrease 相当（縮小率 = min(w/iw, h/ih)）
+// を式で表し、偶数へ丸めて GPU 上で縮小する。iw/ih は hwupload 後＝キャプチャ実寸。
+// 縮小率は min(1, …) で 1 に上限を付け、キャプチャが枠より小さくても拡大しない
+// （CPU 経路の force_original_aspect_ratio=decrease と挙動を揃える）。
+// pad は GPU に無いので hwdownload して CPU で行う（縮小済みの小フレームなので安価）。
+// 注: min() 内のカンマはフィルタグラフの区切りと衝突するため \, でエスケープする。
+func gpuFitPadVF(w, h, fps int) string {
+	scl := fmt.Sprintf(
+		"scale_vt=w='trunc(iw*min(1\\,min(%d/iw\\,%d/ih))/2)*2':h='trunc(ih*min(1\\,min(%d/iw\\,%d/ih))/2)*2'",
+		w, h, w, h)
+	// fps を hwupload の前に置き、間引くフレームをアップロードしない。
+	return fmt.Sprintf(
+		"fps=%d,hwupload,%s,hwdownload,format=nv12,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black",
+		fps, scl, w, h)
 }
 
 // Align16 は v4l2 のストライド・パディング由来のシアー（斜めズレ）を避けるため、

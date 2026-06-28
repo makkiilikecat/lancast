@@ -23,9 +23,17 @@ type HostConfig struct {
 	ExtraArgs     string `json:"extra_args"` // 追加 ffmpeg 引数（空白区切り）
 
 	// TargetAspect はプリセット（縦解像度 → 横ドット数）の算出に使う基準比。
-	// 例 "16:9" "16:10"。"" は検出した実画面比を使う。送出自体は Width:Height を
-	// そのまま使う（黒帯やアナモルフィックはしない＝WYSIWYG）。
+	// 例 "16:9" "16:10"。"" は検出した実画面比を使う。これでクライアントが要求する
+	// 画面比率（=出力枠 Width×Height の比）が決まる。送出はキャプチャをこの枠へアスペクト
+	// 比を保って縮小し、余白を黒帯で中央寄せ pad する（歪み無し。比が一致すれば黒帯ゼロ）。
 	TargetAspect string `json:"target_aspect"`
+
+	// ScreenW/ScreenH は検出したキャプチャ元画面の実解像度（0=不明）。永続化しない
+	// （マシン依存・実行時に検出する値のため json:"-"）。リソース最適化のヒントで、画面比が
+	// 出力枠 Width:Height と一致＝黒帯不要のときは、pad を省いた純 GPU ゼロコピー経路を選べる。
+	// 既存コードと同じく「キャプチャ＝メインディスプレイ」を前提とする（不明時は安全側=fit+pad）。
+	ScreenW int `json:"-"`
+	ScreenH int `json:"-"`
 }
 
 // ClientConfig は受信側（ネットワーク受信 → 仮想カメラ書き込み）の設定。
